@@ -1,8 +1,8 @@
 //! Path, equivalence, and transport semantics for `ValueModel` (ADR-0100).
 
 use handl_language::{Ast, Language, Term};
-use handl_plugin_engine_exec_tree_walk::{TreeWalkEngine, ValueModel};
-use plugin_engine::{Model, ModelCtx, TermData};
+use hnl_engine_exec_tree_walk::{TreeWalkEngine, ValueModel};
+use hnl_engine::{Model, ModelCtx, TermData};
 use serde_json::json;
 
 /// Convert `TermData` back to `Term` for engine APIs that require `Term`.
@@ -13,10 +13,10 @@ fn td(t: TermData) -> Term {
 fn model_ctx<'a>(
     lang: &'a Language,
     ast: &'a Ast,
-    current_node: &'a plugin_engine::AstNode,
+    current_node: &'a hnl_engine::AstNode,
 ) -> ModelCtx<'a> {
-    let lang_view: &dyn plugin_engine::LanguageView = lang;
-    let ast_view: &dyn plugin_engine::AstView = ast;
+    let lang_view: &dyn hnl_engine::LanguageView = lang;
+    let ast_view: &dyn hnl_engine::AstView = ast;
     ModelCtx {
         ast: ast_view,
         lang: lang_view,
@@ -30,7 +30,7 @@ fn model_ctx<'a>(
 fn path_value() {
     let lang = Language::new();
     let ast = Ast::new();
-    let current_node = plugin_engine::AstNode;
+    let current_node = hnl_engine::AstNode;
     let mut ctx = model_ctx(&lang, &ast, &current_node);
 
     let term = td(TermData::path(
@@ -58,7 +58,7 @@ fn path_value() {
 fn equiv_equal() {
     let lang = Language::new();
     let ast = Ast::new();
-    let current_node = plugin_engine::AstNode;
+    let current_node = hnl_engine::AstNode;
     let mut ctx = model_ctx(&lang, &ast, &current_node);
 
     let term = td(TermData::equiv(

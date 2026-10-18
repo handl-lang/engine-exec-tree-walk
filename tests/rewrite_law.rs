@@ -5,8 +5,8 @@
 //! target terms are run and compared.
 
 use handl_language::{ArrSource, Ast, Language, Term, Value};
-use handl_plugin_engine_exec_tree_walk::{TreeWalkEngine, ValueModel};
-use plugin_engine::{Model, ModelCtx, RewriteResult, RewriteWitness, TermData};
+use hnl_engine_exec_tree_walk::{TreeWalkEngine, ValueModel};
+use hnl_engine::{Model, ModelCtx, RewriteResult, RewriteWitness, TermData};
 use serde_json::json;
 
 fn t(td: TermData) -> Term {
@@ -16,10 +16,10 @@ fn t(td: TermData) -> Term {
 fn model_ctx<'a>(
     lang: &'a Language,
     ast: &'a Ast,
-    node: &'a plugin_engine::AstNode,
+    node: &'a hnl_engine::AstNode,
 ) -> ModelCtx<'a> {
-    let lang_view: &dyn plugin_engine::LanguageView = lang;
-    let ast_view: &dyn plugin_engine::AstView = ast;
+    let lang_view: &dyn hnl_engine::LanguageView = lang;
+    let ast_view: &dyn hnl_engine::AstView = ast;
     ModelCtx {
         ast: ast_view,
         lang: lang_view,
@@ -59,7 +59,7 @@ fn named_law_lookup_returns_equal() {
     lang.register_law("add_zero", add_zero_law(x));
 
     let ast = Ast::new();
-    let current_node = plugin_engine::AstNode;
+    let current_node = hnl_engine::AstNode;
     let mut ctx = model_ctx(&lang, &ast, &current_node);
 
     let incoming = json!(null);
@@ -82,7 +82,7 @@ fn named_rewrite_lookup_returns_rewritten() {
     lang.register_rewrite("one_to_two", one_to_two_rewrite());
 
     let ast = Ast::new();
-    let current_node = plugin_engine::AstNode;
+    let current_node = hnl_engine::AstNode;
     let mut ctx = model_ctx(&lang, &ast, &current_node);
 
     let incoming = json!(null);
@@ -103,7 +103,7 @@ fn named_rewrite_lookup_returns_rewritten() {
 fn unknown_named_law_falls_back_to_equality_check() {
     let lang = Language::new();
     let ast = Ast::new();
-    let current_node = plugin_engine::AstNode;
+    let current_node = hnl_engine::AstNode;
     let mut ctx = model_ctx(&lang, &ast, &current_node);
 
     let incoming = json!(null);

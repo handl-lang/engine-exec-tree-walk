@@ -1,4 +1,4 @@
-//! # handl-plugin-engine-exec-tree-walk
+//! # hnl-engine-exec-tree-walk
 //!
 //! The **reference interpreter** for the eval operation (ADR-0044 §3, §4,
 //! ADR-0052). Interprets the arrow-calculus [`handl_language::Term`]
@@ -107,16 +107,16 @@ use handl_language::{
     ArrSource, Ast, AstNode, AstRef, LangError, Language, Term, Value, tag_value,
 };
 use handl_platform::{ModuleLookup, ValueCallable};
-use handl_plugin_engine_exec::native_ops::{
+use hnl_engine_exec::native_ops::{
     self, NativeOpCtx, OpService, build_loop_step_args, is_truthy, loop_step_outcome, step_decision,
 };
-use handl_plugin_engine_exec::pattern_match::{self, PatternMatchCtx};
-use handl_plugin_engine_exec::{EvalEngine, EvalRequest, ImportResolver};
+use hnl_engine_exec::pattern_match::{self, PatternMatchCtx};
+use hnl_engine_exec::{EvalEngine, EvalRequest, ImportResolver};
 use handl_value::{
     TaggedValue, cell_comp_axis, cell_dim, cell2_comp_v, cell2_id, cell2_src, cell2_tgt,
     cell2_whisker, record_proj, tagged_to_value,
 };
-use plugin_engine::{Model, ModelCtx, RewriteResult, TermData, is_hott_tag};
+use hnl_engine::{Model, ModelCtx, RewriteResult, TermData, is_hott_tag};
 
 /// The globular dimension of a term (ADR-0120 Phase 5) — delegates to
 /// [`TermData::globular_dim`], the shared implementation. `Seq{axis: k}`
@@ -2228,7 +2228,7 @@ impl TreeWalkEngine {
     /// carried sub-schemes only when the shared [`step_decision`]
     /// semantics need them (e.g. `while_step` never runs `body` once the
     /// condition fails). The decision itself is defined once in
-    /// `plugin-engine-exec::native_ops`.
+    /// `hnl-engine-exec::native_ops`.
     #[allow(clippy::too_many_arguments)]
     fn eval_derived_step(
         &self,
@@ -2321,7 +2321,7 @@ impl TreeWalkEngine {
     /// pushed (`extend_env` pushes).
     ///
     /// The op semantics are defined once in
-    /// `plugin-engine-exec::native_ops` (ADR-0044 §7): this engine supplies
+    /// `hnl-engine-exec::native_ops` (ADR-0044 §7): this engine supplies
     /// only the globals — the `ScopeStack`, AST-node evaluation, and arrow
     /// application — through [`TwCtx`]. The residual `match` below owns
     /// ops that still require this engine's deeper machinery (imports,
@@ -3374,7 +3374,7 @@ impl EvalEngine for TreeWalkEngine {
     }
 }
 
-/// A `plugin_engine::Model` adapter around the tree-walk engine.
+/// A `hnl_engine::Model` adapter around the tree-walk engine.
 ///
 /// It evaluates bare [`Term`] schemes by mounting them on a minimal
 /// dummy AST / Language context and reusing the existing tree-walk
@@ -3386,7 +3386,7 @@ impl EvalEngine for TreeWalkEngine {
 /// `Model` (e.g. [`HandlModelAdapter`](handl_plugin_lib_handl::HandlModelAdapter)
 /// wrapping `arrow_model.hnl`). When set via
 /// [`ValueModel::with_arrow_model_delegate`], [`Model::run`] delegates
-/// HoTT-type terms — those for which [`plugin_engine::is_hott_tag`]
+/// HoTT-type terms — those for which [`hnl_engine::is_hott_tag`]
 /// returns `true` — to the delegate *before* the native Rust match
 /// dispatch. If the delegate returns `NotImplemented`, the engine falls
 /// back to its existing match arms, so the delegate is strictly opt-in:
@@ -3412,7 +3412,7 @@ impl ValueModel {
     /// Configure an arrow-model delegate (a Handl-authored `Model` such
     /// as `HandlModelAdapter`) that handles HoTT-type terms. When set,
     /// [`Model::run`] delegates any term for which
-    /// [`plugin_engine::is_hott_tag`] returns `true` to this delegate
+    /// [`hnl_engine::is_hott_tag`] returns `true` to this delegate
     /// before the native match dispatch, falling back on
     /// `NotImplemented`. This is the ADR-0103 continuation seam that
     /// begins stripping HoTT semantics out of the Rust tree-walk engine.
@@ -3431,18 +3431,18 @@ impl ValueModel {
         &self,
         term: &Term,
         incoming: Value,
-    ) -> Result<Value, plugin_engine::LangError> {
+    ) -> Result<Value, hnl_engine::LangError> {
         let mut ast = Ast::new();
         ast.push(AstNode::new("model"));
         let node_ref = AstRef::new(0);
         let node = ast
             .at(node_ref)
-            .map_err(|_| plugin_engine::LangError::NotImplemented)?;
+            .map_err(|_| hnl_engine::LangError::NotImplemented)?;
         let lang = Language::new();
         let mut env = ScopeStack::new();
         self.0
             .eval_scheme(term, &ast, node_ref, &lang, &mut env, node, Some(incoming))
-            .map_err(|_| plugin_engine::LangError::NotImplemented)
+            .map_err(|_| hnl_engine::LangError::NotImplemented)
     }
 
     /// Dimension-typed `Op` dispatch (ADR-0120 Phase 3): the op's `dim`
@@ -3462,7 +3462,7 @@ impl ValueModel {
         args: &[Term],
         incoming: Value,
         ctx: &mut ModelCtx,
-    ) -> Result<Option<Value>, plugin_engine::LangError> {
+    ) -> Result<Option<Value>, hnl_engine::LangError> {
         // a. The required dimension: the op's own `dim` label first, then
         //    the language-level op declaration's `grade` (itself the
         //        named dimension the op was declared at).
@@ -3481,7 +3481,7 @@ impl ValueModel {
                 .map(|arr| arr.iter().filter_map(Value::as_str).collect::<Vec<_>>())
                 .unwrap_or_default();
             if !grades.contains(&grade.as_str()) {
-                return Err(plugin_engine::LangError::NotImplemented);
+                return Err(hnl_engine::LangError::NotImplemented);
             }
         }
 
@@ -3530,7 +3530,7 @@ impl ValueModel {
         };
 
         let impl_term: Term = serde_json::from_value(impl_json)
-            .map_err(|_| plugin_engine::LangError::NotImplemented)?;
+            .map_err(|_| hnl_engine::LangError::NotImplemented)?;
         // Feed the handler the incoming value paired with the evaluated
         // args so it can consume them.
         let handler_in = if arg_vals.is_empty() {
@@ -3550,7 +3550,7 @@ impl Model for ValueModel {
         term: &Term,
         incoming: Self::Value,
         ctx: &mut ModelCtx,
-    ) -> Result<Self::Value, plugin_engine::LangError> {
+    ) -> Result<Self::Value, hnl_engine::LangError> {
         // ADR-0103 continuation: delegate HoTT-type terms to the
         // arrow-model delegate (a Handl-authored `.hnl` model) *before*
         // the native Rust match dispatch. This begins stripping HoTT
@@ -3564,7 +3564,7 @@ impl Model for ValueModel {
             if is_hott_tag(term) {
                 match delegate.run(term, incoming.clone(), ctx) {
                     Ok(v) => return Ok(v),
-                    // `plugin_engine::LangError` is currently single-variant
+                    // `hnl_engine::LangError` is currently single-variant
                     // (`NotImplemented`); fall through to the native match
                     // arms so the delegate is strictly opt-in.
                     Err(_) => { /* fall through */ }
@@ -3597,18 +3597,18 @@ impl Model for ValueModel {
                     None => {
                         let axis_term = axis_td
                             .to_term()
-                            .map_err(|_| plugin_engine::LangError::NotImplemented)?;
+                            .map_err(|_| hnl_engine::LangError::NotImplemented)?;
                         let axis_val = self.run(&axis_term, incoming.clone(), ctx)?;
                         axis_val.as_u64()
                     }
                 }
-                .ok_or(plugin_engine::LangError::NotImplemented)?;
+                .ok_or(hnl_engine::LangError::NotImplemented)?;
                 let fst_term = fst
                     .to_term()
-                    .map_err(|_| plugin_engine::LangError::NotImplemented)?;
+                    .map_err(|_| hnl_engine::LangError::NotImplemented)?;
                 let snd_term = snd
                     .to_term()
-                    .map_err(|_| plugin_engine::LangError::NotImplemented)?;
+                    .map_err(|_| hnl_engine::LangError::NotImplemented)?;
                 // ADR-0120 Phase 5: `∘ₖ` on n-cells (n > k) pastes at the
                 // value level; axis 0 on 1-cells stays sequential. The
                 // effective dimension lifts to the evaluated values' own
@@ -3625,10 +3625,10 @@ impl Model for ValueModel {
                     let snd_tv = TaggedValue::from(snd_val);
                     let eff_dim = fst_dim.max(cell_dim(&fst_tv)).max(cell_dim(&snd_tv));
                     if axis_index >= eff_dim {
-                        return Err(plugin_engine::LangError::NotImplemented);
+                        return Err(hnl_engine::LangError::NotImplemented);
                     }
                     let composed = cell_comp_axis(axis_index, eff_dim, &fst_tv, &snd_tv)
-                        .map_err(|_| plugin_engine::LangError::NotImplemented)?;
+                        .map_err(|_| hnl_engine::LangError::NotImplemented)?;
                     Ok(tagged_to_value(&composed))
                 }
             }
@@ -3638,10 +3638,10 @@ impl Model for ValueModel {
                     .expect("Rewrite term missing 'target' field");
                 let target_term = target
                     .to_term()
-                    .map_err(|_| plugin_engine::LangError::NotImplemented)?;
+                    .map_err(|_| hnl_engine::LangError::NotImplemented)?;
                 match self.run(&target_term, incoming, ctx) {
                     Ok(v) => Ok(v),
-                    Err(_) => Err(plugin_engine::LangError::NotImplemented),
+                    Err(_) => Err(hnl_engine::LangError::NotImplemented),
                 }
             }
             // `Child { role }` (ADR-0081): resolve the named child role to a
@@ -3652,7 +3652,7 @@ impl Model for ValueModel {
             // objects, so the recursive `eval_scheme` call — which needs the
             // concrete `Ast`/`Language` — recovers them via `as_any`
             // downcasts. Non-`handl_language` views return `NotImplemented`.
-            // TODO: give `plugin_engine::LangError` a payload so real errors
+            // TODO: give `hnl_engine::LangError` a payload so real errors
             // can be propagated instead of collapsed to `NotImplemented`.
             "Child" => {
                 let role = td.get_str("role").expect("Child term missing 'role' field");
@@ -3660,16 +3660,16 @@ impl Model for ValueModel {
                     .ast
                     .as_any()
                     .downcast_ref::<Ast>()
-                    .ok_or(plugin_engine::LangError::NotImplemented)?;
+                    .ok_or(hnl_engine::LangError::NotImplemented)?;
                 let lang = ctx
                     .lang
                     .as_any()
                     .downcast_ref::<Language>()
-                    .ok_or(plugin_engine::LangError::NotImplemented)?;
+                    .ok_or(hnl_engine::LangError::NotImplemented)?;
                 let kind = ctx
                     .ast
                     .node_kind(ctx.node_ref)
-                    .ok_or(plugin_engine::LangError::NotImplemented)?;
+                    .ok_or(hnl_engine::LangError::NotImplemented)?;
                 // Arity-aware resolution through `LanguageView`: probe the
                 // node's child count so `optional` roles (e.g. `match`'s
                 // motive slot) shift later roles correctly (ADR-0081).
@@ -3683,18 +3683,18 @@ impl Model for ValueModel {
                 let child_idx = ctx
                     .lang
                     .child_role_index_at(kind, role, arity)
-                    .ok_or(plugin_engine::LangError::NotImplemented)?;
+                    .ok_or(hnl_engine::LangError::NotImplemented)?;
                 let child_ref = ctx
                     .ast
                     .node_child(ctx.node_ref, child_idx)
-                    .ok_or(plugin_engine::LangError::NotImplemented)?;
+                    .ok_or(hnl_engine::LangError::NotImplemented)?;
                 let child_kind = ctx
                     .ast
                     .node_kind(child_ref)
-                    .ok_or(plugin_engine::LangError::NotImplemented)?;
+                    .ok_or(hnl_engine::LangError::NotImplemented)?;
                 let child_node = ast
                     .at(AstRef::new(child_ref))
-                    .map_err(|_| plugin_engine::LangError::NotImplemented)?;
+                    .map_err(|_| hnl_engine::LangError::NotImplemented)?;
                 let mut env = ScopeStack::new();
                 match ctx.lang.eval_rule(child_kind) {
                     Some(scheme) => self
@@ -3708,14 +3708,14 @@ impl Model for ValueModel {
                             child_node,
                             Some(incoming),
                         )
-                        .map_err(|_| plugin_engine::LangError::NotImplemented),
+                        .map_err(|_| hnl_engine::LangError::NotImplemented),
                     // No eval scheme for the child kind — fall back to the
                     // engine's own node evaluation (which returns the
                     // payload for literal nodes).
                     None => self
                         .0
                         .eval_node(ast, AstRef::new(child_ref), lang, &mut env)
-                        .map_err(|_| plugin_engine::LangError::NotImplemented),
+                        .map_err(|_| hnl_engine::LangError::NotImplemented),
                 }
             }
             // `handle body with target = impl_`: evaluate `impl_` to a
@@ -3730,10 +3730,10 @@ impl Model for ValueModel {
                     .expect("Handle term missing 'impl_' field");
                 let body_term = body
                     .to_term()
-                    .map_err(|_| plugin_engine::LangError::NotImplemented)?;
+                    .map_err(|_| hnl_engine::LangError::NotImplemented)?;
                 let impl_term = impl_
                     .to_term()
-                    .map_err(|_| plugin_engine::LangError::NotImplemented)?;
+                    .map_err(|_| hnl_engine::LangError::NotImplemented)?;
                 let handler = self.run(&impl_term, incoming.clone(), ctx)?;
                 ctx.push_handler(handler.clone());
                 let _guard =
@@ -3769,7 +3769,7 @@ impl Model for ValueModel {
                     None => {
                         let dim_term = dim_td
                             .to_term()
-                            .map_err(|_| plugin_engine::LangError::NotImplemented)?;
+                            .map_err(|_| hnl_engine::LangError::NotImplemented)?;
                         self.run(&dim_term, incoming.clone(), ctx)?
                             .as_str()
                             .map(str::to_string)
@@ -3782,7 +3782,7 @@ impl Model for ValueModel {
                     args.push(
                         arg_td
                             .to_term()
-                            .map_err(|_| plugin_engine::LangError::NotImplemented)?,
+                            .map_err(|_| hnl_engine::LangError::NotImplemented)?,
                     );
                 }
                 if let Some(v) =
@@ -3797,10 +3797,10 @@ impl Model for ValueModel {
                 let b = td.get_term("to").expect("Path term missing 'to' field");
                 let a_term = a
                     .to_term()
-                    .map_err(|_| plugin_engine::LangError::NotImplemented)?;
+                    .map_err(|_| hnl_engine::LangError::NotImplemented)?;
                 let b_term = b
                     .to_term()
-                    .map_err(|_| plugin_engine::LangError::NotImplemented)?;
+                    .map_err(|_| hnl_engine::LangError::NotImplemented)?;
                 let a_val = self.run(&a_term, incoming.clone(), ctx)?;
                 let b_val = self.run(&b_term, incoming.clone(), ctx)?;
                 let w_val = match td.get("witness") {
@@ -3808,7 +3808,7 @@ impl Model for ValueModel {
                         let w_td = TermData(v.clone());
                         let w_term = w_td
                             .to_term()
-                            .map_err(|_| plugin_engine::LangError::NotImplemented)?;
+                            .map_err(|_| hnl_engine::LangError::NotImplemented)?;
                         self.run(&w_term, incoming, ctx)?
                     }
                     _ => Value::Null,
@@ -3825,10 +3825,10 @@ impl Model for ValueModel {
                 let b = td.get_term("b").expect("Equiv term missing 'b' field");
                 let a_term = a
                     .to_term()
-                    .map_err(|_| plugin_engine::LangError::NotImplemented)?;
+                    .map_err(|_| hnl_engine::LangError::NotImplemented)?;
                 let b_term = b
                     .to_term()
-                    .map_err(|_| plugin_engine::LangError::NotImplemented)?;
+                    .map_err(|_| hnl_engine::LangError::NotImplemented)?;
                 let a_val = self.run(&a_term, incoming.clone(), ctx)?;
                 let b_val = self.run(&b_term, incoming.clone(), ctx)?;
                 let mut eq = a_val == b_val;
@@ -3836,7 +3836,7 @@ impl Model for ValueModel {
                     if !p.as_value().is_null() {
                         let p_term = p
                             .to_term()
-                            .map_err(|_| plugin_engine::LangError::NotImplemented)?;
+                            .map_err(|_| hnl_engine::LangError::NotImplemented)?;
                         let p_val = self.run(&p_term, incoming, ctx)?;
                         if let Value::Object(obj) = &p_val {
                             if obj.get("__tag__").and_then(Value::as_str) == Some("Path") {
@@ -3859,12 +3859,12 @@ impl Model for ValueModel {
         &self,
         source: &Term,
         target: &Term,
-        witness: &plugin_engine::RewriteWitness,
+        witness: &hnl_engine::RewriteWitness,
         incoming: &Self::Value,
         ctx: &mut ModelCtx,
-    ) -> Result<RewriteResult<Self::Value>, plugin_engine::LangError> {
+    ) -> Result<RewriteResult<Self::Value>, hnl_engine::LangError> {
         let (source, target, is_rewrite) = match witness {
-            plugin_engine::RewriteWitness::Named(name) => {
+            hnl_engine::RewriteWitness::Named(name) => {
                 if let Some(rule) = ctx.lang.law(name) {
                     let law_source = rule
                         .get("source")
@@ -3891,7 +3891,7 @@ impl Model for ValueModel {
                     (source.clone(), target.clone(), false)
                 }
             }
-            plugin_engine::RewriteWitness::Compute => (source.clone(), target.clone(), true),
+            hnl_engine::RewriteWitness::Compute => (source.clone(), target.clone(), true),
             _ => (source.clone(), target.clone(), false),
         };
         if TermData::from_term(&source).is_tag("Rewrite")
@@ -3996,7 +3996,7 @@ impl ValueCallable for TreeWalkCallable {
 /// The tree-walk engine's [`NativeOpCtx`] — the engine-local globals the
 /// shared op table needs: the `ScopeStack`, AST-node evaluation, and
 /// arrow application. The op *semantics* live in
-/// `plugin-engine-exec::native_ops`; this struct only forwards services.
+/// `hnl-engine-exec::native_ops`; this struct only forwards services.
 struct TwCtx<'e, 'a> {
     engine: &'e TreeWalkEngine,
     ast: &'a Ast,
@@ -4405,8 +4405,8 @@ mod tests {
     use super::*;
     use handl_language::{AstNode, AstShapeDef, ChildRoleSpec, EvalSchemeDef, Language, Term};
     use handl_platform::{EvalContext, Function, Module, ModuleLookup};
-    use handl_plugin_engine_exec::EvalRequest;
-    use handl_plugin_engine_exec::native_ops::Num;
+    use hnl_engine_exec::EvalRequest;
+    use hnl_engine_exec::native_ops::Num;
     use handl_plugin_module::ModuleRegistry;
     use serde_json::json;
 

@@ -4,8 +4,8 @@
 //! drives them through `ValueModel::dispatch_op`.
 
 use handl_language::{ArrSource, Ast, Language, Term, Value};
-use handl_plugin_engine_exec_tree_walk::{TreeWalkEngine, ValueModel};
-use plugin_engine::{Model, ModelCtx, TermData};
+use hnl_engine_exec_tree_walk::{TreeWalkEngine, ValueModel};
+use hnl_engine::{Model, ModelCtx, TermData};
 use serde_json::json;
 
 /// Convert `TermData` back to `Term` for engine APIs that require `Term`.
@@ -55,11 +55,11 @@ fn add_handler_value(value: f64) -> Value {
 fn model_ctx<'a>(
     lang: &'a Language,
     ast: &'a Ast,
-    node: &'a plugin_engine::AstNode,
+    node: &'a hnl_engine::AstNode,
     handler_stack: Vec<Value>,
 ) -> ModelCtx<'a> {
-    let lang_view: &dyn plugin_engine::LanguageView = lang;
-    let ast_view: &dyn plugin_engine::AstView = ast;
+    let lang_view: &dyn hnl_engine::LanguageView = lang;
+    let ast_view: &dyn hnl_engine::AstView = ast;
     ModelCtx {
         ast: ast_view,
         lang: lang_view,
@@ -89,7 +89,7 @@ fn setup() -> (Language, Ast, Value) {
 #[test]
 fn grade_dispatches_to_language_handler() {
     let (lang, ast, incoming) = setup();
-    let current_node = plugin_engine::AstNode;
+    let current_node = hnl_engine::AstNode;
     let mut ctx = model_ctx(&lang, &ast, &current_node, vec![]);
 
     let result = ValueModel::new(TreeWalkEngine::new())
@@ -101,19 +101,19 @@ fn grade_dispatches_to_language_handler() {
 #[test]
 fn missing_grade_returns_not_implemented() {
     let (lang, ast, _incoming) = setup();
-    let current_node = plugin_engine::AstNode;
+    let current_node = hnl_engine::AstNode;
     let incoming = number_value(&["Multiplicable"]);
     let mut ctx = model_ctx(&lang, &ast, &current_node, vec![]);
 
     let result = ValueModel::new(TreeWalkEngine::new()).run(&add_term(), incoming, &mut ctx);
-    assert_eq!(result, Err(plugin_engine::LangError::NotImplemented));
+    assert_eq!(result, Err(hnl_engine::LangError::NotImplemented));
 }
 
 #[test]
 fn no_handler_falls_back_to_native() {
     let (mut lang, ast, incoming) = setup();
     lang.handlers.clear();
-    let current_node = plugin_engine::AstNode;
+    let current_node = hnl_engine::AstNode;
     let mut ctx = model_ctx(&lang, &ast, &current_node, vec![]);
 
     let result = ValueModel::new(TreeWalkEngine::new())
@@ -125,7 +125,7 @@ fn no_handler_falls_back_to_native() {
 #[test]
 fn handler_stack_overrides_language_handler() {
     let (lang, ast, incoming) = setup();
-    let current_node = plugin_engine::AstNode;
+    let current_node = hnl_engine::AstNode;
     let stack_handler = add_handler_value(100.0);
     let mut ctx = model_ctx(&lang, &ast, &current_node, vec![stack_handler]);
 

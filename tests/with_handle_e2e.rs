@@ -9,8 +9,8 @@
 
 use handl_language::{ArrSource, tag_value};
 use handl_language::{Ast, Language, Term, Value};
-use handl_plugin_engine_exec_tree_walk::{TreeWalkEngine, ValueModel};
-use plugin_engine::{Model, ModelCtx, TermData};
+use hnl_engine_exec_tree_walk::{TreeWalkEngine, ValueModel};
+use hnl_engine::{Model, ModelCtx, TermData};
 use serde_json::json;
 
 /// Convert `TermData` back to `Term` for engine APIs that require `Term`.
@@ -54,11 +54,11 @@ fn add_handler() -> Value {
 fn model_ctx<'a>(
     lang: &'a Language,
     ast: &'a Ast,
-    node: &'a plugin_engine::AstNode,
+    node: &'a hnl_engine::AstNode,
     handler_stack: Vec<Value>,
 ) -> ModelCtx<'a> {
-    let lang_view: &dyn plugin_engine::LanguageView = lang;
-    let ast_view: &dyn plugin_engine::AstView = ast;
+    let lang_view: &dyn hnl_engine::LanguageView = lang;
+    let ast_view: &dyn hnl_engine::AstView = ast;
     ModelCtx {
         ast: ast_view,
         lang: lang_view,
@@ -90,7 +90,7 @@ fn with_handle_pipeline_with_canonical_language() {
 
     // 4. Evaluate with `ValueModel`; incoming value carries `Addable`.
     let ast = Ast::new();
-    let current_node = plugin_engine::AstNode;
+    let current_node = hnl_engine::AstNode;
     let incoming = number_value(&["Addable"], 0.0);
     let mut ctx = model_ctx(&lang, &ast, &current_node, vec![]);
 
