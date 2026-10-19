@@ -71,7 +71,7 @@ fn model_ctx<'a>(
 #[test]
 fn with_handle_pipeline_with_canonical_language() {
     // 1. Build a `Language` from the canonical data-driven kit.
-    let mut lang = handl_kit_data_canonical::language_from_yaml().unwrap();
+    let mut lang = handl_kit_data_prelude::language_from_yaml().unwrap();
 
     // 2. Register the graded `add` op and the `Addable` handler on the
     //    `Language`. `handlers_by_grade` is the dispatch table used by

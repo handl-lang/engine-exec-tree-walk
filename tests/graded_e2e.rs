@@ -65,7 +65,7 @@ fn model_ctx<'a>(lang: &'a Language, ast: &'a Ast, handler_stack: Vec<Value>) ->
 #[test]
 fn sort_grade_op_handler_pipeline_with_canonical_language() {
     // 1. Build a Language from the canonical data.
-    let mut lang = handl_kit_data_canonical::language_from_yaml().unwrap();
+    let mut lang = handl_kit_data_prelude::language_from_yaml().unwrap();
 
     // 2. Register the `sort` (Number value), `grade` (Addable key), `op`,
     //    and `handler` on the Language.
