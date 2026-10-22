@@ -113,7 +113,7 @@ use hnl_engine_exec::native_ops::{
 use hnl_engine_exec::pattern_match::{self, PatternMatchCtx};
 use hnl_engine_exec::{EvalEngine, EvalRequest, ImportResolver};
 use handl_value::{
-    TaggedValue, cell_comp_axis, cell_dim, cell2_comp_v, cell2_id, cell2_src, cell2_tgt,
+    Sym, TaggedValue, cell_comp_axis, cell_dim, cell2_comp_v, cell2_id, cell2_src, cell2_tgt,
     cell2_whisker, record_proj, tagged_to_value,
 };
 use hnl_engine::{Model, ModelCtx, RewriteResult, TermData, is_hott_tag};
@@ -1349,7 +1349,7 @@ impl TreeWalkEngine {
                         let _ = target; // retained for diagnostics
                         let _guard =
                             HandlerStackGuard::push(&self.handler_stack, [handler_val.clone()]);
-                        let result = self.eval_inner_td(
+                        let (val, pushed) = self.eval_inner_td(
                             &body,
                             ast,
                             node_ref,
@@ -1357,16 +1357,30 @@ impl TreeWalkEngine {
                             env,
                             current_node,
                             incoming,
-                        );
+                        )?;
+                        // IO(sig) effect interpretation (ADR-0153 §4):
+                        // when the body produces an `IO` former object,
+                        // the sig record's fields are read as op names
+                        // and dispatched to the handler's matching
+                        // entries (the handler is still on the stack, so
+                        // `dispatch_op` resolves them exactly like an
+                        // `arr <op>` dispatch). Ops no handler covers
+                        // stay data in the result `IO` value.
+                        let val = self.interpret_io_former(
+                            val,
+                            ast,
+                            node_ref,
+                            lang,
+                            env,
+                            current_node,
+                        )?;
                         // Deep handler: when the body produces an
                         // applicable value (an `arr <op>` dispatch object
                         // or a closure), the handler travels with it and
                         // is reinstalled on every application —
                         // `handle arr read with Clock` binds a reusable
                         // handled arrow, not a one-shot dispatch.
-                        result.map(|(val, pushed)| {
-                            (attach_carried_handler(val, &handler_val), pushed)
-                        })
+                        Ok((attach_carried_handler(val, &handler_val), pushed))
                     }
                     Err(_) => {
                         let eliminated = {
@@ -2211,6 +2225,73 @@ impl TreeWalkEngine {
             incoming.cloned(),
         )?;
         Ok(Some((val, pushed)))
+    }
+
+    /// `IO(sig)` effect interpretation (ADR-0153 §4): an `IO` former
+    /// object `{"__former__": <type.io sym>, "indices": [sig]}` produced
+    /// under `handle … with` has its sig record's fields read as op
+    /// names — each named op dispatches through [`Self::dispatch_op`] to
+    /// the covering handler's matching entry (`handler.impls[op]` /
+    /// `handler[op]`), with the sig entry's value as the operand, and
+    /// the entry is replaced by the handler's result. Ops no handler
+    /// covers keep their original value — the `IO` object stays data
+    /// for outer handlers or user destructuring. A non-IO value (or an
+    /// `IO` with no object sig) passes through untouched, the minimal
+    /// `handle` semantics consistent with `handle <expr> with <record>`
+    /// usage in lib files (handler record fields are op names).
+    #[allow(clippy::too_many_arguments)]
+    fn interpret_io_former(
+        &self,
+        val: TaggedValue,
+        ast: &Ast,
+        node_ref: AstRef,
+        lang: &Language,
+        env: &mut ScopeStack,
+        current_node: &AstNode,
+    ) -> Result<TaggedValue, LangError> {
+        let TaggedValue::Obj(map) = &val else {
+            return Ok(val);
+        };
+        let io_handle = Sym::seeded("type.io").handle();
+        let is_io = match map.get("__former__") {
+            Some(TaggedValue::Sym(s)) => s.handle() == io_handle,
+            Some(TaggedValue::Obj(f)) => {
+                matches!(f.get("sym"), Some(TaggedValue::Sym(s)) if s.handle() == io_handle)
+            }
+            _ => false,
+        };
+        if !is_io {
+            return Ok(val);
+        }
+        let mut indices: Vec<TaggedValue> = match map.get("indices") {
+            Some(TaggedValue::Arr(xs)) => xs.iter().cloned().collect(),
+            _ => Vec::new(),
+        };
+        let Some(TaggedValue::Obj(sig_map)) = indices.first() else {
+            return Ok(val);
+        };
+        let mut out_sig: FxHashMap<Rc<str>, TaggedValue> = (**sig_map).clone();
+        for (k, req) in out_sig.clone() {
+            if let Some((res, pushed)) = self.dispatch_op(
+                k.as_ref(),
+                None,
+                Some(&req),
+                ast,
+                node_ref,
+                lang,
+                env,
+                current_node,
+            )? {
+                if pushed {
+                    env.pop_scope();
+                }
+                out_sig.insert(k, res);
+            }
+        }
+        indices[0] = TaggedValue::Obj(Rc::new(out_sig));
+        let mut out_map = (**map).clone();
+        out_map.insert(Rc::from("indices"), TaggedValue::Arr(Rc::from(indices)));
+        Ok(TaggedValue::Obj(Rc::new(out_map)))
     }
 
     /// Evaluate a derived-pattern composite step op
