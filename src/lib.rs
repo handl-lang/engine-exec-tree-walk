@@ -4269,6 +4269,23 @@ impl NativeOpCtx for TwCtx<'_, '_> {
     fn import_resolver(&self) -> Option<&dyn ImportResolver> {
         self.engine.import_resolver.as_deref()
     }
+
+    fn handler_push(&mut self, handler: TaggedValue) {
+        self.engine.handler_stack.borrow_mut().push(handler);
+    }
+
+    fn handler_pop(&mut self) {
+        self.engine.handler_stack.borrow_mut().pop();
+    }
+
+    fn handler_lookup(&self, op: &str) -> Option<TaggedValue> {
+        self.engine
+            .handler_stack
+            .borrow()
+            .iter()
+            .rev()
+            .find_map(|h| native_ops::handler_impl(h, op))
+    }
 }
 
 /// Whether `v` is an arrow-level value — a `TaggedValue::Arrow` closure
