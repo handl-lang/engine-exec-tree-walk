@@ -4110,6 +4110,10 @@ impl PatternMatchCtx for TwCtx<'_, '_> {
             .map(|v| TaggedValue::from(v.clone()))
     }
 
+    fn scope_value(&self, name: &str) -> Option<TaggedValue> {
+        self.env.lookup(name).cloned()
+    }
+
     fn lang(&self) -> Option<&Language> {
         Some(self.lang)
     }
