@@ -156,6 +156,166 @@ thread_local! {
     // per live arrow afterwards.
     static ARROW_ARENA_CACHE: RefCell<HashMap<usize, (Rc<TaggedValue>, Rc<Ast>)>> =
         RefCell::new(HashMap::new());
+    /// Active replay journals for multi-shot `resume` (ADR-0158
+    /// workstream — `host/project/design/multishot-resume.md`). One
+    /// entry per `handle` whose handler has a ≥2-ary clause, innermost
+    /// last. Thread-local (not engine state): `TreeWalkCallable`
+    /// host-callback paths construct a fresh `TreeWalkEngine`, so
+    /// `resume` invoked inside a clause's callback (e.g.
+    /// `list.flat_map`'s) must find the journal without an engine
+    /// handle.
+    static RESUME_JOURNALS: RefCell<Vec<Rc<ResumeJournal>>> = const { RefCell::new(Vec::new()) };
+    /// Suspension table: `LangError::Suspended { id }` carries only the
+    /// index; the captured state lives here. Entries persist after the
+    /// `handle` returns so an escaped `resume` still runs (documented
+    /// escape semantics) — the table is per-eval-thread and never
+    /// collected (prototype; see the design doc's limits).
+    static RESUME_SUSPENSIONS: RefCell<HashMap<u64, Rc<ResumeSuspension>>> =
+        RefCell::new(HashMap::new());
+    /// Monotonic suspension id source.
+    static RESUME_NEXT_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// Reserved object key marking a `resume` value (`{"__resume__": <id>}`),
+/// intercepted by `apply_app` — same convention as `__term__`/`__arr__`.
+const RESUME_KEY: &str = "__resume__";
+
+/// Reserved handler-frame key binding a pushed frame to its replay
+/// journal (`{"__journal__": <id>}`), stamped by the journal driver when
+/// it installs the handler — how `perform`/`dispatch_op` find the
+/// journal that owns a covering multi-shot clause, independent of the
+/// frame's mutating `__acc__` slot.
+const JOURNAL_FRAME_KEY: &str = "__journal__";
+
+/// A replay journal: everything `resume` needs to re-run one `handle`
+/// body (multi-shot resumption, delimited re-run model). All captured
+/// state is data — the body term, its incoming value, the `handle`-entry
+/// environment snapshot, the covering handler value, and the AST arena.
+struct ResumeJournal {
+    /// Unique journal instance id — suspensions name the journal they
+    /// belong to so nested `handle`s catch only their own.
+    id: u64,
+    /// The `handle` body term (the `!Child role:"target"` projection,
+    /// evaluated once per run).
+    body: TermData,
+    /// The `incoming` value the body evaluated under.
+    incoming: Option<TaggedValue>,
+    /// Environment snapshot at `handle` entry — each run evals a clone,
+    /// so `assign` writes and scope pushes stay inside the run.
+    entry_env: ScopeStack,
+    /// The handler value (`{impls: {op: impl}}` or `{op: impl}` record).
+    handler: TaggedValue,
+    /// The arena the body term is interpreted against (cloned — `resume`
+    /// may run after the owning eval returned).
+    ast: Ast,
+    /// The `handle` node's arena ref — diagnostics context on re-run.
+    node_ref: AstRef,
+    /// `(op, result)` entries in perform order: the replay log. `resume(x)`
+    /// at suspension index `i` seeds a fresh journal with
+    /// `entries[..i] ++ [(op, x)]`.
+    entries: RefCell<Vec<(Rc<str>, TaggedValue)>>,
+    /// Count of journal-intercepted `perform`s so far this run — the
+    /// replay cursor. Fresh runs start at 0 and consume `entries`.
+    cursor: std::cell::Cell<usize>,
+}
+
+/// A captured suspension: the `perform` site that unwound to a `handle`
+/// driver. `resume` = this record plus a fresh journal seeded with the
+/// prefix `entries[..index] ++ [(op, x)]`.
+struct ResumeSuspension {
+    /// The journal active when the perform suspended.
+    journal: Rc<ResumeJournal>,
+    /// This perform's index in the journal's `entries` order.
+    index: usize,
+    /// The performed op name.
+    op: Rc<str>,
+    /// The perform's payload argument.
+    arg: TaggedValue,
+}
+
+/// Whether an impl value opts into multi-shot dispatch: an arrow value
+/// taking ≥2 params `(payload, resume)`. Serialized-`Term` impls and
+/// 1-ary arrows stay on the one-shot path.
+fn impl_is_multishot(impl_val: &TaggedValue) -> bool {
+    matches!(impl_val, TaggedValue::Arrow { params, .. } if params.len() >= 2)
+}
+
+/// Whether `handler` carries any ≥2-ary clause — the gate for running a
+/// `handle` body under a replay journal. Clause names are `impls` fields
+/// (canonical `handler` record) or the record's own fields (surface
+/// `{op: impl}` spelling); reserved keys (`return`, `__*__`) are not
+/// clauses.
+fn handler_has_multishot(handler: &TaggedValue) -> bool {
+    let fields: Vec<TaggedValue> = match handler.get("impls") {
+        Some(TaggedValue::Obj(m)) => m.values().cloned().collect(),
+        _ => match handler {
+            TaggedValue::Obj(m) => m
+                .iter()
+                .filter(|(k, _)| !k.starts_with("__") && k.as_ref() != "return")
+                .map(|(_, v)| v.clone())
+                .collect(),
+            _ => Vec::new(),
+        },
+    };
+    fields.iter().any(impl_is_multishot)
+}
+
+/// Stamp `journal.id` onto a copy of `handler` — the frame shape the
+/// journal driver installs on the handler stack (see
+/// [`JOURNAL_FRAME_KEY`]).
+fn journal_frame_value(handler: &TaggedValue, id: u64) -> TaggedValue {
+    if let TaggedValue::Obj(map) = handler {
+        let mut m = (**map).clone();
+        m.insert(Rc::from(JOURNAL_FRAME_KEY), TaggedValue::Int(id as i64));
+        return TaggedValue::Obj(Rc::new(m));
+    }
+    handler.clone()
+}
+
+/// Mint a `resume` value bound to suspension `id` — a
+/// `{"__resume__": <id>}` object `apply_app` drives.
+fn mint_resume_value(id: u64) -> TaggedValue {
+    let mut m: FxHashMap<Rc<str>, TaggedValue> = FxHashMap::default();
+    m.insert(Rc::from(RESUME_KEY), TaggedValue::Int(id as i64));
+    TaggedValue::Obj(Rc::new(m))
+}
+
+/// Decode a `__resume__` payload to a suspension id.
+fn resume_id_of(v: &TaggedValue) -> Option<u64> {
+    match v {
+        TaggedValue::Int(i) if *i >= 0 => Some(*i as u64),
+        TaggedValue::Float(f) if *f >= 0.0 && f.fract() == 0.0 => Some(*f as u64),
+        _ => None,
+    }
+}
+
+/// Next suspension/journal id.
+fn next_resume_id() -> u64 {
+    RESUME_NEXT_ID.with(|c| {
+        let id = c.get();
+        c.set(id + 1);
+        id
+    })
+}
+
+/// RAII journal-scope guard — pops the journal on drop, including error
+/// exits (mirrors [`HandlerStackGuard`]).
+struct JournalGuard;
+
+impl JournalGuard {
+    /// Push `journal` onto `RESUME_JOURNALS`; popped on drop.
+    fn push(journal: Rc<ResumeJournal>) -> Self {
+        RESUME_JOURNALS.with(|js| js.borrow_mut().push(journal));
+        JournalGuard
+    }
+}
+
+impl Drop for JournalGuard {
+    fn drop(&mut self) {
+        RESUME_JOURNALS.with(|js| {
+            js.borrow_mut().pop();
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +458,20 @@ impl Drop for HandlerStackGuard<'_> {
 /// Small by design: applications cycle through a handful of hot arrows, and
 /// the table is cleared (not evicted one-by-one) when it fills.
 const ARROW_ARENA_CACHE_CAP: usize = 64;
+
+/// Remaining-stack budget at which [`stacker::maybe_grow`] moves the next
+/// eval step onto a fresh segment. The tree-walk recurses natively once
+/// per arrow application (`eval_node_inner` → scheme → `apply_app` →
+/// `apply_arrow_body` → `eval_node_inner`), so a self-recursive arrow —
+/// or a `handle … with` reinstalling deep handlers each level — would
+/// overflow the platform stack at a few thousand calls. Checking at the
+/// two recursion funnels bounds eval depth by total growable stack.
+/// Mirrors `hnl-engine-typecheck-nbe`'s `STACK_RED_ZONE`.
+const STACK_RED_ZONE: usize = 4 * 1024 * 1024;
+
+/// Fresh stack segment allocated by [`stacker::maybe_grow`] on overflow
+/// (see [`STACK_RED_ZONE`]).
+const STACK_SEGMENT: usize = 8 * 1024 * 1024;
 /// Tag for first-class `arr <op>` dispatch objects (ADR-0103 value shape).
 const ARR_DISPATCH_TAG: &str = "__arr__";
 
@@ -357,6 +531,11 @@ fn cached_def_arena(def: &Rc<TaggedValue>) -> Option<Rc<Ast>> {
 /// every arrow call. `lookup()` falls back to `globals` after
 /// searching the scope stack, and `capture()` only collects user-created
 /// scopes — never globals.
+///
+/// `Clone`: multi-shot `resume` snapshots the `handle`-entry environment
+/// into a replay journal so each `resume` re-run starts from the same
+/// scope state (`globals` shares its `Rc`; scopes deep-clone).
+#[derive(Clone)]
 pub struct ScopeStack {
     /// The stack of scopes, innermost last. `pub(crate)` so the engine
     /// can manage the `binds` install/restore around arrow application.
@@ -1300,7 +1479,7 @@ impl TreeWalkEngine {
                 // (same path as `call` nodes). Otherwise, it's an
                 // arrow-value — apply it as a closure.
                 let val = if let Some(name) = callee_val.as_str() {
-                    self.call_host_fn(name, &actual_args, current_node)?
+                    self.call_host_fn(name, &actual_args, ast, node_ref, lang, env, current_node)?
                 } else {
                     self.apply_app(
                         &callee_val,
@@ -1347,8 +1526,64 @@ impl TreeWalkEngine {
                 ) {
                     Ok(handler_val) => {
                         let _ = target; // retained for diagnostics
+                        // ADR-0158 `acc` clause: `handle <body> with h
+                        // acc s0` — the optional trailing `acc` child
+                        // seeds the `__acc__` slot on the pushed frame
+                        // (the `c` wire of the `(args, s) ~> (result,
+                        // s')` loop).
+                        let acc = role_child_arena(lang, current_node, "acc")
+                            .map(|i| self.eval_node_inner(ast, AstRef::new(i), lang, env))
+                            .transpose()?;
+                        let frame_handler = match &acc {
+                            Some(s0) => native_ops::handler_with_acc(&handler_val, s0.clone()),
+                            None => handler_val.clone(),
+                        };
+                        // Multi-shot resumption (ADR-0158 workstream —
+                        // `design/multishot-resume.md`): a ≥2-ary clause
+                        // `(payload, resume) ~> …` runs the body under a
+                        // replay journal — covered `perform`s/`Op`s
+                        // suspend to the driver and `resume` re-runs the
+                        // body from this boundary. `acc` frames are
+                        // excluded: their 2-ary impls are the
+                        // `(payload, s) ~> (result, s')` convention, not
+                        // resumptions. 1-ary-only handlers take the
+                        // direct path below unchanged.
+                        if acc.is_none() && handler_has_multishot(&handler_val) {
+                            let journal = Rc::new(ResumeJournal {
+                                id: next_resume_id(),
+                                body: body.clone(),
+                                incoming: incoming.clone(),
+                                entry_env: env.clone(),
+                                handler: frame_handler.clone(),
+                                ast: ast.clone(),
+                                node_ref,
+                                entries: RefCell::new(Vec::new()),
+                                cursor: std::cell::Cell::new(0),
+                            });
+                            let val = self.drive_handled_body(
+                                &journal,
+                                lang,
+                                env,
+                                current_node,
+                            )?;
+                            // Residual-IO post-pass + deep-handler carry —
+                            // same as the direct path below.
+                            let _guard = HandlerStackGuard::push(
+                                &self.handler_stack,
+                                [frame_handler.clone()],
+                            );
+                            let val = self.interpret_io_former(
+                                val,
+                                ast,
+                                node_ref,
+                                lang,
+                                env,
+                                current_node,
+                            )?;
+                            return Ok((attach_carried_handler(val, &frame_handler), false));
+                        }
                         let _guard =
-                            HandlerStackGuard::push(&self.handler_stack, [handler_val.clone()]);
+                            HandlerStackGuard::push(&self.handler_stack, [frame_handler.clone()]);
                         let (val, pushed) = self.eval_inner_td(
                             &body,
                             ast,
@@ -1374,15 +1609,62 @@ impl TreeWalkEngine {
                             env,
                             current_node,
                         )?;
+                        // ADR-0158 `return` clause + `acc` final state:
+                        // `h["return"](r)` (or `h["return"](r, s_final)`
+                        // under `acc`) applies to the arrow's pure
+                        // result; without `return`, `acc` handles yield
+                        // the `(result, s_final)` pair; a plain `handle`
+                        // passes the result through. The return clause
+                        // runs on the frame's final `__acc__` — the
+                        // algebra's unit map is outside the handler's
+                        // own extent.
+                        let final_acc = self
+                            .handler_stack
+                            .borrow()
+                            .last()
+                            .and_then(|f| f.get(native_ops::HANDLER_ACC_KEY).cloned());
+                        let ret_impl = native_ops::handler_impl(&handler_val, "return");
+                        let val = match (ret_impl, final_acc) {
+                            (Some(ret), s) => {
+                                let mut ctx = TwCtx {
+                                    engine: self,
+                                    ast,
+                                    node_ref,
+                                    lang,
+                                    env,
+                                    current_node,
+                                };
+                                match s {
+                                    Some(s) => native_ops::apply_handler_impl(
+                                        &mut ctx,
+                                        &ret,
+                                        &[val, s],
+                                    )?,
+                                    None => {
+                                        native_ops::apply_handler_impl(&mut ctx, &ret, &[val])?
+                                    }
+                                }
+                            }
+                            (None, Some(s)) => pair(val, s),
+                            (None, None) => val,
+                        };
                         // Deep handler: when the body produces an
                         // applicable value (an `arr <op>` dispatch object
                         // or a closure), the handler travels with it and
                         // is reinstalled on every application —
                         // `handle arr read with Clock` binds a reusable
-                        // handled arrow, not a one-shot dispatch.
-                        Ok((attach_carried_handler(val, &handler_val), pushed))
+                        // handled arrow, not a one-shot dispatch. The
+                        // carried handler is the `acc`-seeded record, so
+                        // each application reinstalls the `__acc__` slot
+                        // at `s0` (state restarts per application).
+                        Ok((attach_carried_handler(val, &frame_handler), pushed))
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        // A suspension must unwind to its journal driver —
+                        // never confuse it with "impl_ not a handler value".
+                        if e.suspension_id().is_some() {
+                            return Err(e);
+                        }
                         let eliminated = {
                             let mut cache = self.eliminated_cache.borrow_mut();
                             if let Some(e) = cache.get(current_node.kind.as_str()) {
@@ -2200,12 +2482,40 @@ impl TreeWalkEngine {
         let Some(impl_json) = impl_json else {
             return Ok(None);
         };
+        // Multi-shot resumption (ADR-0158 workstream): when a
+        // journal-bound ≥2-ary clause covers `op`, replay a journaled
+        // result or suspend to the owning `handle` driver instead of
+        // applying — a bare ≥2-ary impl (no journal) falls through to
+        // the ordinary apply and errors on arity, exactly as before.
+        if let Some(v) = self.journal_perform_or_suspend_op(
+            op,
+            incoming.cloned().unwrap_or(TaggedValue::Null),
+            current_node,
+        )? {
+            return Ok(Some((v, false)));
+        }
         // A handler implementation may be a first-class arrow (closure) or
         // a serialized [`Term`].  Prefer the closure path so surface
         // arrows (`url ~> ...`) work without a Term round-trip.
         let impl_val = TaggedValue::from(impl_json.clone());
         if let TaggedValue::Arrow { .. } = impl_val {
             let inc = incoming.cloned().unwrap_or(TaggedValue::Null);
+            // ADR-0158 `acc`: a covering frame carrying the `__acc__`
+            // slot threads `(payload, s) ~> (result, s')` — `s'` is
+            // written back to the frame. (Serialized-Term impls below
+            // keep the plain single-incoming convention.)
+            if let Some(acc) = native_ops::covering_frame_acc(&self.handler_stack.borrow(), op) {
+                let out =
+                    self.apply_app(&impl_val, &[inc, acc], ast, lang, env, node_ref, current_node)?;
+                let (res, s2) = native_ops::acc_result_split(out, op)
+                    .map_err(|e| e.with_node(current_node))?;
+                native_ops::covering_frame_set_acc(
+                    self.handler_stack.borrow_mut().as_mut_slice(),
+                    op,
+                    s2,
+                );
+                return Ok(Some((res, false)));
+            }
             let val = self.apply_app(&impl_val, &[inc], ast, lang, env, node_ref, current_node)?;
             return Ok(Some((val, false)));
         }
@@ -2292,6 +2602,260 @@ impl TreeWalkEngine {
         let mut out_map = (**map).clone();
         out_map.insert(Rc::from("indices"), TaggedValue::Arr(Rc::from(indices)));
         Ok(TaggedValue::Obj(Rc::new(out_map)))
+    }
+
+    // ------------------------------------------------------------------
+    // Multi-shot resumption (ADR-0158 workstream —
+    // `host/project/design/multishot-resume.md`): replay-journal driver.
+    // ------------------------------------------------------------------
+
+    /// Run a `handle` body under `journal` — the shared driver behind the
+    /// `Handle` arm's multi-shot branch and `resume` application.
+    ///
+    /// The journal + a [`JOURNAL_FRAME_KEY`]-stamped handler frame are
+    /// installed for the body's dynamic extent, then dropped before the
+    /// `return`/op clauses apply — the clauses run at the `handle` site,
+    /// outside their own coverage (a `perform` inside a clause dispatches
+    /// to *outer* handlers, matching the algebra reading).
+    ///
+    /// - Body completes `v` → `h["return"](v)` when a `return` clause
+    ///   exists, else `v`.
+    /// - Body suspends (`LangError::Suspended`) on this journal → invoke
+    ///   the op's clause `(payload, resume)`; the clause result is the
+    ///   driver's result — `resume`'s own calls fold the `return` clause
+    ///   in through their own runs.
+    /// - Suspensions owned by other journals, and ordinary errors,
+    ///   re-propagate.
+    fn drive_handled_body(
+        &self,
+        journal: &Rc<ResumeJournal>,
+        lang: &Language,
+        env: &mut ScopeStack,
+        current_node: &AstNode,
+    ) -> Result<TaggedValue, LangError> {
+        let node = journal
+            .ast
+            .at(journal.node_ref)
+            .map_err(|e| LangError::engine_node(format!("resume: {e}"), current_node))?;
+        let run_result = {
+            let _jguard = JournalGuard::push(Rc::clone(journal));
+            let frame = journal_frame_value(&journal.handler, journal.id);
+            let _hguard = HandlerStackGuard::push(&self.handler_stack, [frame]);
+            // Each run evals a *clone* of the handle-entry env — scope
+            // pushes and `assign` writes stay inside the run.
+            let mut run_env = journal.entry_env.clone();
+            match self.eval_inner_td(
+                &journal.body,
+                &journal.ast,
+                journal.node_ref,
+                lang,
+                &mut run_env,
+                &node,
+                journal.incoming.clone(),
+            ) {
+                Ok((val, pushed)) => {
+                    if pushed {
+                        run_env.pop_scope();
+                    }
+                    Ok(val)
+                }
+                Err(e) => Err(e),
+            }
+        };
+        match run_result {
+            Ok(val) => {
+                // `return` clause — the algebra's unit map on the pure
+                // result (ADR-0158). Applied at every driver completion
+                // so a `resume` return includes it.
+                if let Some(ret) = native_ops::handler_impl(&journal.handler, "return") {
+                    return self.apply_app(
+                        &ret,
+                        &[val],
+                        &journal.ast,
+                        lang,
+                        env,
+                        journal.node_ref,
+                        &node,
+                    );
+                }
+                Ok(val)
+            }
+            Err(e) => {
+                if let Some(id) = e.suspension_id() {
+                    let susp = RESUME_SUSPENSIONS.with(|t| t.borrow().get(&id).cloned());
+                    if let Some(susp) = susp.filter(|s| s.journal.id == journal.id) {
+                        let impl_val =
+                            native_ops::handler_impl(&journal.handler, &susp.op).ok_or_else(|| {
+                                LangError::engine_node(
+                                    format!(
+                                        "resume: no impl for suspended op '{}'",
+                                        susp.op
+                                    ),
+                                    &node,
+                                )
+                            })?;
+                        // The clause gets `(payload, resume)`; its result
+                        // is the `handle` result (deep-handler reading).
+                        let k = mint_resume_value(id);
+                        return self.apply_app(
+                            &impl_val,
+                            &[susp.arg.clone(), k],
+                            &journal.ast,
+                            lang,
+                            env,
+                            journal.node_ref,
+                            &node,
+                        );
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// `perform` interception (multi-shot): `args` are the `PerformFn`
+    /// argument vector `[op, payload?]`. When the op's covering handler
+    /// frame is journal-bound and its clause is ≥2-ary, either replay the
+    /// journaled result at the cursor (`Ok(Some(v))`) or suspend
+    /// (`Err(LangError::Suspended)`). `Ok(None)` → fall through to
+    /// `native_ops::perform_dispatch` (one-shot) or the residual mint.
+    fn journal_perform_or_suspend(
+        &self,
+        args: &[TaggedValue],
+        current_node: &AstNode,
+    ) -> Result<Option<TaggedValue>, LangError> {
+        // Op-name operand spellings mirror `PerformFn`: string, sym, or
+        // the `{"sym": <sym>}` object encoding.
+        let op: Rc<str> = match args.first() {
+            Some(TaggedValue::Str(s)) => Rc::clone(s) as Rc<str>,
+            Some(TaggedValue::Sym(s)) => Rc::from(s.name()),
+            Some(TaggedValue::Obj(f)) => match f.get("sym") {
+                Some(TaggedValue::Sym(s)) => Rc::from(s.name()),
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        let arg = args.get(1).cloned().unwrap_or(TaggedValue::Null);
+        self.journal_perform_or_suspend_op(&op, arg, current_node)
+    }
+
+    /// The op-level half of [`journal_perform_or_suspend`], shared with
+    /// `dispatch_op` (`Term::Op` dispatch): resolve the innermost
+    /// covering handler frame, and when its clause is a journal-bound
+    /// ≥2-ary impl, replay or suspend.
+    fn journal_perform_or_suspend_op(
+        &self,
+        op: &str,
+        arg: TaggedValue,
+        current_node: &AstNode,
+    ) -> Result<Option<TaggedValue>, LangError> {
+        // The innermost covering frame — the same frame `handler_lookup`
+        // / `perform_dispatch` would resolve.
+        let covering = {
+            let stack = self.handler_stack.borrow();
+            stack
+                .iter()
+                .rev()
+                .find(|h| native_ops::handler_impl(h, op).is_some())
+                .cloned()
+        };
+        let Some(frame) = covering else {
+            return Ok(None);
+        };
+        // `acc` frames use 2-ary impls for the `(payload, s)` convention —
+        // not resumptions. Non-arrow and 1-ary impls take the one-shot path.
+        if frame.get(native_ops::HANDLER_ACC_KEY).is_some() {
+            return Ok(None);
+        }
+        let Some(impl_val) = native_ops::handler_impl(&frame, op) else {
+            return Ok(None);
+        };
+        if !impl_is_multishot(&impl_val) {
+            return Ok(None);
+        }
+        // Journal-bound? A frame installed by a journal driver carries
+        // `__journal__`. Carried/foreign ≥2-ary impls fall through to the
+        // ordinary apply (arity error, as before).
+        let Some(TaggedValue::Int(jid)) = frame.get(JOURNAL_FRAME_KEY) else {
+            return Ok(None);
+        };
+        let jid = *jid as u64;
+        let journal = RESUME_JOURNALS.with(|js| {
+            js.borrow().iter().rev().find(|j| j.id == jid).cloned()
+        });
+        let Some(journal) = journal else {
+            return Ok(None);
+        };
+        // Replay-or-suspend at this journal's cursor.
+        let i = journal.cursor.get();
+        journal.cursor.set(i + 1);
+        if let Some((logged_op, val)) = journal.entries.borrow().get(i).cloned() {
+            if logged_op.as_ref() != op {
+                return Err(LangError::engine_node(
+                    format!(
+                        "resume: replay op mismatch at index {i} — journaled '{logged_op}', \
+                         re-ran '{op}' (nondeterministic perform sequence: replay requires \
+                         deterministic bodies)"
+                    ),
+                    current_node,
+                ));
+            }
+            return Ok(Some(val));
+        }
+        let id = next_resume_id();
+        RESUME_SUSPENSIONS.with(|t| {
+            t.borrow_mut().insert(
+                id,
+                Rc::new(ResumeSuspension {
+                    journal: Rc::clone(&journal),
+                    index: i,
+                    op: Rc::from(op),
+                    arg,
+                }),
+            );
+        });
+        Err(LangError::suspended(id))
+    }
+
+    /// `resume(x)` — re-run the suspended `handle` body under a fresh
+    /// journal seeded with `entries[..index] ++ [(op, x)]`. The body's
+    /// completed value (through the `return` clause) is `resume`'s
+    /// result; a suspension inside the re-run invokes the covering
+    /// clause again and its result is this call's result — copyable,
+    /// multi-shot delimited continuation via replay.
+    fn resume_suspension(
+        &self,
+        id: u64,
+        x: TaggedValue,
+        lang: &Language,
+        env: &mut ScopeStack,
+        current_node: &AstNode,
+    ) -> Result<TaggedValue, LangError> {
+        let susp = RESUME_SUSPENSIONS
+            .with(|t| t.borrow().get(&id).cloned())
+            .ok_or_else(|| {
+                LangError::engine_node(
+                    format!("resume: unknown resumption {id} — suspension not in the table"),
+                    current_node,
+                )
+            })?;
+        let j = &susp.journal;
+        let prefix_len = susp.index.min(j.entries.borrow().len());
+        let mut entries: Vec<(Rc<str>, TaggedValue)> =
+            j.entries.borrow()[..prefix_len].to_vec();
+        entries.push((Rc::clone(&susp.op), x));
+        let j2 = Rc::new(ResumeJournal {
+            id: next_resume_id(),
+            body: j.body.clone(),
+            incoming: j.incoming.clone(),
+            entry_env: j.entry_env.clone(),
+            handler: j.handler.clone(),
+            ast: j.ast.clone(),
+            node_ref: j.node_ref,
+            entries: RefCell::new(entries),
+            cursor: std::cell::Cell::new(0),
+        });
+        self.drive_handled_body(&j2, lang, env, current_node)
     }
 
     /// Evaluate a derived-pattern composite step op
@@ -2507,6 +3071,38 @@ impl TreeWalkEngine {
                         }
                     }
                     return Ok((result, false));
+                }
+
+                // ADR-0158: `perform(op, arg)` under a covering handler
+                // dispatches in-flight — consult the runtime handler
+                // stack before the `IO` mint; uncovered ops fall
+                // through to `PerformFn`'s residual mint.
+                if native_ops::is_perform_callee(callee) {
+                    let arg_tvs: Vec<TaggedValue> = args
+                        .first()
+                        .and_then(|v| v.as_array().map(|a| a.to_vec()))
+                        .unwrap_or_default();
+                    // Multi-shot first: a journal-bound ≥2-ary clause
+                    // replays a journaled result or suspends
+                    // (`LangError::Suspended`) to the `handle` driver.
+                    if let Some(v) =
+                        self.journal_perform_or_suspend(&arg_tvs, current_node)?
+                    {
+                        return Ok((v, false));
+                    }
+                    let mut ctx = TwCtx {
+                        engine: self,
+                        ast,
+                        node_ref,
+                        lang,
+                        env,
+                        current_node,
+                    };
+                    if let Some(v) = native_ops::perform_dispatch(&mut ctx, &arg_tvs)
+                        .map_err(|e| e.with_node(current_node))?
+                    {
+                        return Ok((v, false));
+                    }
                 }
 
                 let modules = self.modules.as_ref().ok_or_else(|| {
@@ -2760,7 +3356,8 @@ impl TreeWalkEngine {
                     vec![input.clone()]
                 };
                 if let Some(name) = callee.as_str() {
-                    let val = self.call_host_fn(name, &actual_args, current_node)?;
+                    let val =
+                        self.call_host_fn(name, &actual_args, ast, node_ref, lang, env, current_node)?;
                     Ok((val, false))
                 } else {
                     let val = self.apply_app(
@@ -2823,9 +3420,38 @@ impl TreeWalkEngine {
         &self,
         name: &str,
         args: &[TaggedValue],
+        ast: &Ast,
+        node_ref: AstRef,
+        lang: &Language,
+        env: &mut ScopeStack,
         current_node: &AstNode,
     ) -> Result<TaggedValue, LangError> {
         // eprintln!("[dbg] call_host_fn: {name}");
+        // ADR-0158: `perform(op, arg)` under a covering handler
+        // dispatches in-flight — consult the runtime handler stack
+        // before the `IO` mint; uncovered ops fall through to
+        // `PerformFn`'s residual mint.
+        if native_ops::is_perform_callee(name) {
+            // Multi-shot first: a journal-bound ≥2-ary clause replays a
+            // journaled result or suspends (`LangError::Suspended`) to
+            // the `handle` driver.
+            if let Some(v) = self.journal_perform_or_suspend(args, current_node)? {
+                return Ok(v);
+            }
+            let mut ctx = TwCtx {
+                engine: self,
+                ast,
+                node_ref,
+                lang,
+                env,
+                current_node,
+            };
+            if let Some(v) = native_ops::perform_dispatch(&mut ctx, args)
+                .map_err(|e| e.with_node(current_node))?
+            {
+                return Ok(v);
+            }
+        }
         let modules = self.modules.as_ref().ok_or_else(|| {
             LangError::engine_node("call_host: no module registry".to_string(), current_node)
         })?;
@@ -2868,6 +3494,43 @@ impl TreeWalkEngine {
         node_ref: AstRef,
         current_node: &AstNode,
     ) -> Result<TaggedValue, LangError> {
+        // Growable-stack seam (see `STACK_RED_ZONE`): the apply↔eval
+        // recursion passes through here once per arrow application.
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_SEGMENT, || {
+            self.apply_app_inner(callee, args, ast, lang, env, node_ref, current_node)
+        })
+    }
+
+    /// The recursive body of [`apply_app`](Self::apply_app), run under
+    /// [`stacker::maybe_grow`].
+    #[allow(clippy::too_many_arguments)]
+    fn apply_app_inner(
+        &self,
+        callee: &TaggedValue,
+        args: &[TaggedValue],
+        ast: &Ast,
+        lang: &Language,
+        env: &mut ScopeStack,
+        node_ref: AstRef,
+        current_node: &AstNode,
+    ) -> Result<TaggedValue, LangError> {
+        // Multi-shot resumption (ADR-0158 workstream): a `resume` value
+        // (`{"__resume__": <id>}`) drives a replay re-run of the
+        // suspended `handle` body. Intercepted before the
+        // dispatch-object/`__term__`/Arrow arms — the reserved-key
+        // convention is the same (`__term__`, `__arr__`).
+        if let TaggedValue::Obj(map) = callee {
+            if let Some(id_val) = map.get(RESUME_KEY) {
+                let id = resume_id_of(id_val).ok_or_else(|| {
+                    LangError::engine_node(
+                        format!("resume: malformed resumption value {id_val:?}"),
+                        current_node,
+                    )
+                })?;
+                let x = args.first().cloned().unwrap_or(TaggedValue::Null);
+                return self.resume_suspension(id, x, lang, env, current_node);
+            }
+        }
         // First-class `arr <op>` dispatch object: apply the op to the args.
         if let Some(inner) = callee.get(ARR_DISPATCH_TAG) {
             let op = inner.get("op").and_then(|v| v.as_str()).ok_or_else(|| {
@@ -2909,7 +3572,15 @@ impl TreeWalkEngine {
                     let mid =
                         self.apply_app(first, args, ast, lang, env, node_ref, current_node)?;
                     if let Some(name) = second.as_str() {
-                        return self.call_host_fn(name, &[mid], current_node);
+                        return self.call_host_fn(
+                            name,
+                            &[mid],
+                            ast,
+                            node_ref,
+                            lang,
+                            env,
+                            current_node,
+                        );
                     }
                     return self.apply_app(second, &[mid], ast, lang, env, node_ref, current_node);
                 }
@@ -3187,6 +3858,24 @@ impl TreeWalkEngine {
     /// Internal node evaluator — the [`TaggedValue`] counterpart of
     /// [`eval_node`](Self::eval_node). Returns a [`TaggedValue`].
     fn eval_node_inner(
+        &self,
+        ast: &Ast,
+        node_ref: AstRef,
+        lang: &Language,
+        env: &mut ScopeStack,
+    ) -> Result<TaggedValue, LangError> {
+        // Growable-stack seam (see `STACK_RED_ZONE`): every recursive
+        // eval cycle — arrow-body evals via `apply_arrow_body`, child
+        // evals via `ctx.eval_node`, `match`/`handle` shells — re-enters
+        // here, so checking at this one funnel bounds every level.
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_SEGMENT, || {
+            self.eval_node_inner_unguarded(ast, node_ref, lang, env)
+        })
+    }
+
+    /// The recursive body of [`eval_node_inner`](Self::eval_node_inner),
+    /// run under [`stacker::maybe_grow`].
+    fn eval_node_inner_unguarded(
         &self,
         ast: &Ast,
         node_ref: AstRef,
@@ -4274,8 +4963,8 @@ impl NativeOpCtx for TwCtx<'_, '_> {
         self.engine.handler_stack.borrow_mut().push(handler);
     }
 
-    fn handler_pop(&mut self) {
-        self.engine.handler_stack.borrow_mut().pop();
+    fn handler_pop(&mut self) -> Option<TaggedValue> {
+        self.engine.handler_stack.borrow_mut().pop()
     }
 
     fn handler_lookup(&self, op: &str) -> Option<TaggedValue> {
@@ -4285,6 +4974,29 @@ impl NativeOpCtx for TwCtx<'_, '_> {
             .iter()
             .rev()
             .find_map(|h| native_ops::handler_impl(h, op))
+    }
+
+    fn handler_acc(&self, op: &str) -> Option<TaggedValue> {
+        native_ops::covering_frame_acc(&self.engine.handler_stack.borrow(), op)
+    }
+
+    fn handler_set_acc(&mut self, op: &str, s: TaggedValue) {
+        native_ops::covering_frame_set_acc(
+            self.engine.handler_stack.borrow_mut().as_mut_slice(),
+            op,
+            s,
+        );
+    }
+
+    fn run_delimited(
+        &mut self,
+        target: AstRef,
+        handler: &TaggedValue,
+        frame_handler: &TaggedValue,
+    ) -> Result<TaggedValue, LangError> {
+        // The tree-walk's own `Handle` arm drives multi-shot journals;
+        // `handle_dyn` invocations keep the shared one-shot tail.
+        native_ops::run_delimited_default(self, target, handler, frame_handler)
     }
 }
 
@@ -7382,6 +8094,187 @@ mod tests {
         let result = engine.eval(&lang, &req).unwrap();
         assert_eq!(result, json!(42));
     }
+    // -----------------------------------------------------------------
+    // Multi-shot `resume` (ADR-0158 workstream — replay journals)
+    // -----------------------------------------------------------------
+
+    /// Minimal language for resumption tests: `var`, `value` (payload
+    /// fallback), `binary.add`, `array`, `idx` (`prim index` — element
+    /// projection), `call` (canonical callee routing — string callees go
+    /// to `call_host`, values to `App`), `function` (closure op),
+    /// `object`/`entry` (handler records), `handle` (`!Handle` term —
+    /// the dynamic-extent arm, not the `match`-style `handle` op).
+    fn resume_lang() -> Language {
+        let mut lang = Language::new();
+        lang.eval
+            .merge(EvalSchemeDef::new("e.var", "var", var("$payload")))
+            .unwrap();
+        lang.eval
+            .merge(EvalSchemeDef::new(
+                "e.add",
+                "binary.add",
+                prim("add", vec![child(0), child(1)]),
+            ))
+            .unwrap();
+        lang.eval
+            .merge(EvalSchemeDef::new("e.array", "array", prim("array", vec![])))
+            .unwrap();
+        lang.eval
+            .merge(EvalSchemeDef::new(
+                "e.idx",
+                "idx",
+                prim("index", vec![child(0), child(1)]),
+            ))
+            .unwrap();
+        // eval.call's canonical shape: route the evaluated callee by
+        // type — string → `call_host` (host fn, incl. `perform`), value
+        // → `App` (arrows, `resume` objects).
+        lang.eval
+            .merge(EvalSchemeDef::new(
+                "e.call",
+                "call",
+                Term::seq(
+                    Term::seq(
+                        child(0),
+                        Term::arr_native_lit("route_on_type", vec![], "string"),
+                    ),
+                    Term::choice(
+                        prim("call_host", vec![prim("proj_rest", vec![])]),
+                        Term::app(prim("id", vec![]), vec![prim("proj_rest", vec![])]),
+                    ),
+                ),
+            ))
+            .unwrap();
+        lang.eval
+            .merge(EvalSchemeDef::new(
+                "e.function",
+                "function",
+                prim("closure", vec![]),
+            ))
+            .unwrap();
+        lang.eval
+            .merge(EvalSchemeDef::new(
+                "e.object",
+                "object",
+                prim("object", vec![]),
+            ))
+            .unwrap();
+        lang.eval
+            .merge(EvalSchemeDef::new(
+                "e.handle",
+                "handle",
+                Term::handle(child(0), "", child(1)),
+            ))
+            .unwrap();
+        lang
+    }
+
+    /// `choose`: `handle (perform(choose, [1,2]) + 100) with
+    /// {choose: (opts, resume) ~> [resume(opts[0]), resume(opts[1])]}`
+    /// → `[101, 102]` — each `resume` call re-runs the body, feeding the
+    /// option back at the `perform` site and continuing through `+100`.
+    #[test]
+    fn choose_multishot_resume_collects_both_continuations() {
+        let engine = TreeWalkEngine::new();
+        let lang = resume_lang();
+        let ast = make_ast(vec![
+            AstNode::new("var").with_payload(json!("perform")), // 0: callee
+            AstNode::new("var").with_payload(json!("choose")),  // 1: op arg
+            AstNode::new("value").with_payload(json!(1)),       // 2
+            AstNode::new("value").with_payload(json!(2)),       // 3
+            AstNode::new("array").with_payload(json!({"children": [2, 3]})), // 4: [1,2]
+            AstNode::new("call").with_payload(json!({"children": [0, 1, 4]})), // 5: perform(choose,[1,2])
+            AstNode::new("value").with_payload(json!(100)),     // 6
+            AstNode::new("binary.add").with_payload(json!({"children": [5, 6]})), // 7: BODY
+            AstNode::new("var").with_payload(json!("resume")),  // 8
+            AstNode::new("var").with_payload(json!("opts")),    // 9
+            AstNode::new("value").with_payload(json!(0)),       // 10
+            AstNode::new("idx").with_payload(json!({"children": [9, 10]})), // 11: opts[0]
+            AstNode::new("call").with_payload(json!({"children": [8, 11]})), // 12: resume(opts[0])
+            AstNode::new("value").with_payload(json!(1)),       // 13
+            AstNode::new("idx").with_payload(json!({"children": [9, 13]})), // 14: opts[1]
+            AstNode::new("call").with_payload(json!({"children": [8, 14]})), // 15: resume(opts[1])
+            AstNode::new("array").with_payload(json!({"children": [12, 15]})), // 16: clause body
+            AstNode::new("function")
+                .with_payload(json!({"params": ["opts", "resume"], "body": 16})), // 17
+            AstNode::new("key").with_payload(json!("choose")),  // 18: entry key
+            AstNode::new("entry").with_payload(json!({"children": [18, 17]})), // 19
+            AstNode::new("object").with_payload(json!({"children": [19]})), // 20: handler
+            AstNode::new("handle").with_payload(json!({"children": [7, 20]})), // 21: root
+        ]);
+        let req = EvalRequest::new(ast);
+        assert_eq!(engine.eval(&lang, &req).unwrap(), json!([101, 102]));
+    }
+
+    /// Nested multi-shot: two `choose`s in one body.
+    /// `handle (perform(choose,[1,2]) + perform(choose,[10,20])) with
+    /// {choose: (opts, resume) ~> [resume(opts[0]), resume(opts[1])]}`
+    /// → `[[11, 21], [12, 22]]` — the second perform suspends inside each
+    /// first-level resume, the clause re-runs per nested suspension.
+    #[test]
+    fn choose_nested_suspensions_are_cartesian() {
+        let engine = TreeWalkEngine::new();
+        let lang = resume_lang();
+        let ast = make_ast(vec![
+            AstNode::new("var").with_payload(json!("perform")), // 0
+            AstNode::new("var").with_payload(json!("choose")),  // 1
+            AstNode::new("value").with_payload(json!(1)),       // 2
+            AstNode::new("value").with_payload(json!(2)),       // 3
+            AstNode::new("array").with_payload(json!({"children": [2, 3]})), // 4: [1,2]
+            AstNode::new("call").with_payload(json!({"children": [0, 1, 4]})), // 5: perform#1
+            AstNode::new("value").with_payload(json!(10)),      // 6
+            AstNode::new("value").with_payload(json!(20)),      // 7
+            AstNode::new("array").with_payload(json!({"children": [6, 7]})), // 8: [10,20]
+            AstNode::new("call").with_payload(json!({"children": [0, 1, 8]})), // 9: perform#2
+            AstNode::new("binary.add").with_payload(json!({"children": [5, 9]})), // 10: BODY
+            AstNode::new("var").with_payload(json!("resume")),  // 11
+            AstNode::new("var").with_payload(json!("opts")),    // 12
+            AstNode::new("value").with_payload(json!(0)),       // 13
+            AstNode::new("idx").with_payload(json!({"children": [12, 13]})), // 14: opts[0]
+            AstNode::new("call").with_payload(json!({"children": [11, 14]})), // 15: resume(opts[0])
+            AstNode::new("value").with_payload(json!(1)),       // 16
+            AstNode::new("idx").with_payload(json!({"children": [12, 16]})), // 17: opts[1]
+            AstNode::new("call").with_payload(json!({"children": [11, 17]})), // 18: resume(opts[1])
+            AstNode::new("array").with_payload(json!({"children": [15, 18]})), // 19: clause
+            AstNode::new("function")
+                .with_payload(json!({"params": ["opts", "resume"], "body": 19})), // 20
+            AstNode::new("key").with_payload(json!("choose")),  // 21
+            AstNode::new("entry").with_payload(json!({"children": [21, 20]})), // 22
+            AstNode::new("object").with_payload(json!({"children": [22]})), // 23
+            AstNode::new("handle").with_payload(json!({"children": [10, 23]})), // 24: root
+        ]);
+        let req = EvalRequest::new(ast);
+        assert_eq!(
+            engine.eval(&lang, &req).unwrap(),
+            json!([[11, 21], [12, 22]])
+        );
+    }
+
+    /// One-shot regression: a 1-ary clause stays on the direct dispatch
+    /// path — `handle perform(puts, "hi") with {puts: s ~> s}` returns
+    /// the impl's result at the perform site (in-flight dispatch,
+    /// ADR-0158). No journal is installed.
+    #[test]
+    fn perform_one_shot_clause_dispatch_unchanged() {
+        let engine = TreeWalkEngine::new();
+        let lang = resume_lang();
+        let ast = make_ast(vec![
+            AstNode::new("var").with_payload(json!("perform")), // 0
+            AstNode::new("var").with_payload(json!("puts")),    // 1
+            AstNode::new("value").with_payload(json!("hi")),    // 2
+            AstNode::new("call").with_payload(json!({"children": [0, 1, 2]})), // 3: perform(puts,"hi")
+            AstNode::new("var").with_payload(json!("s")),       // 4: clause body
+            AstNode::new("function")
+                .with_payload(json!({"params": ["s"], "body": 4})), // 5: 1-ary impl
+            AstNode::new("key").with_payload(json!("puts")),    // 6
+            AstNode::new("entry").with_payload(json!({"children": [6, 5]})), // 7
+            AstNode::new("object").with_payload(json!({"children": [7]})), // 8
+            AstNode::new("handle").with_payload(json!({"children": [3, 8]})), // 9: root
+        ]);
+        let req = EvalRequest::new(ast);
+        assert_eq!(engine.eval(&lang, &req).unwrap(), json!("hi"));
+    }
+
 }
 // ---------------------------------------------------------------------------
 // ADR-0106 item 2 — `body_def` arena memo (`cached_def_arena`)
@@ -7563,4 +8456,5 @@ mod arrow_arena_cache_tests {
         assert!(result.is_ok());
         assert!(CURRENT_LANG.with(|c| c.borrow().is_none()));
     }
+
 }
