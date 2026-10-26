@@ -107,16 +107,16 @@ use handl_language::{
     ArrSource, Ast, AstNode, AstRef, LangError, Language, Term, Value, tag_value,
 };
 use handl_platform::{ModuleLookup, ValueCallable};
-use hnl_engine_exec::native_ops::{
-    self, NativeOpCtx, OpService, build_loop_step_args, is_truthy, loop_step_outcome, step_decision,
-};
-use hnl_engine_exec::pattern_match::{self, PatternMatchCtx};
-use hnl_engine_exec::{EvalEngine, EvalRequest, ImportResolver};
 use handl_value::{
     Sym, TaggedValue, cell_comp_axis, cell_dim, cell2_comp_v, cell2_id, cell2_src, cell2_tgt,
     cell2_whisker, record_proj, tagged_to_value,
 };
 use hnl_engine::{Model, ModelCtx, RewriteResult, TermData, is_hott_tag};
+use hnl_engine_exec::native_ops::{
+    self, NativeOpCtx, OpService, build_loop_step_args, is_truthy, loop_step_outcome, step_decision,
+};
+use hnl_engine_exec::pattern_match::{self, PatternMatchCtx};
+use hnl_engine_exec::{EvalEngine, EvalRequest, ImportResolver};
 
 /// The globular dimension of a term (ADR-0120 Phase 5) — delegates to
 /// [`TermData::globular_dim`], the shared implementation. `Seq{axis: k}`
@@ -129,12 +129,13 @@ fn term_dim(td: &TermData) -> u64 {
 // ValueCallable impl can access them when host functions (e.g. fn.map)
 // call arrow-values via ctx.try_call_value.
 thread_local! {
-    static CURRENT_LANG: RefCell<Option<Rc<Language>>> = RefCell::new(None);
+    static CURRENT_LANG: RefCell<Option<Rc<Language>>> = const { RefCell::new(None) };
     static CURRENT_MODULES: RefCell<Option<Rc<dyn ModuleLookup>>> = RefCell::new(None);
     // Host-provided globals (e.g. `self`), shared via `Rc` so the
     // `TreeWalkCallable` path (host functions calling arrow-values) can
     // re-attach them to a fresh `ScopeStack` without a deep clone.
-    static CURRENT_GLOBALS: RefCell<Option<Rc<FxHashMap<Rc<str>, TaggedValue>>>> = RefCell::new(None);
+#[allow(clippy::type_complexity)]
+    static CURRENT_GLOBALS: RefCell<Option<Rc<FxHashMap<Rc<str>, TaggedValue>>>> = const { RefCell::new(None) };
     // Import resolver for `import` native ops inside arrows that are called
     // across runtime boundaries (e.g. a `.hnl` module arrow invoked by the
     // test runner needs the module loader's resolver to re-resolve its home
@@ -154,6 +155,7 @@ thread_local! {
     // Growth is bounded by `ARROW_ARENA_CACHE_CAP`: the table is cleared
     // when it reaches the cap, which costs at most one re-deserialization
     // per live arrow afterwards.
+#[allow(clippy::type_complexity)]
     static ARROW_ARENA_CACHE: RefCell<HashMap<usize, (Rc<TaggedValue>, Rc<Ast>)>> =
         RefCell::new(HashMap::new());
     /// Active replay journals for multi-shot `resume` (ADR-0158
@@ -815,14 +817,14 @@ impl TreeWalkEngine {
 
     /// Collect the grade(s) declared by an `Arrow` record, if any.
     fn collect_arrow_grades(&self, value: &TaggedValue, env: &mut ScopeStack) {
-        if let TaggedValue::Obj(map) = value {
-            if map.get("__tag__").and_then(|t| t.as_str()) == Some("Arrow") {
-                if let Some(grade) = map.get("grade") {
-                    self.collect_grades(grade, env);
-                }
-                if let Some(grades) = map.get("grades") {
-                    self.collect_grades(grades, env);
-                }
+        if let TaggedValue::Obj(map) = value
+            && map.get("__tag__").and_then(|t| t.as_str()) == Some("Arrow")
+        {
+            if let Some(grade) = map.get("grade") {
+                self.collect_grades(grade, env);
+            }
+            if let Some(grades) = map.get("grades") {
+                self.collect_grades(grades, env);
             }
         }
     }
@@ -1463,9 +1465,7 @@ impl TreeWalkEngine {
                                     current_node,
                                 )
                             })?
-                            .iter()
-                            .cloned()
-                            .collect()
+                            .to_vec()
                     } else if matches!(arg_vals[0], TaggedValue::Pair(_)) {
                         flatten_pair(&arg_vals[0])
                     } else {
@@ -1560,12 +1560,7 @@ impl TreeWalkEngine {
                                 entries: RefCell::new(Vec::new()),
                                 cursor: std::cell::Cell::new(0),
                             });
-                            let val = self.drive_handled_body(
-                                &journal,
-                                lang,
-                                env,
-                                current_node,
-                            )?;
+                            let val = self.drive_handled_body(&journal, lang, env, current_node)?;
                             // Residual-IO post-pass + deep-handler carry —
                             // same as the direct path below.
                             let _guard = HandlerStackGuard::push(
@@ -1601,14 +1596,8 @@ impl TreeWalkEngine {
                         // `dispatch_op` resolves them exactly like an
                         // `arr <op>` dispatch). Ops no handler covers
                         // stay data in the result `IO` value.
-                        let val = self.interpret_io_former(
-                            val,
-                            ast,
-                            node_ref,
-                            lang,
-                            env,
-                            current_node,
-                        )?;
+                        let val =
+                            self.interpret_io_former(val, ast, node_ref, lang, env, current_node)?;
                         // ADR-0158 `return` clause + `acc` final state:
                         // `h["return"](r)` (or `h["return"](r, s_final)`
                         // under `acc`) applies to the arrow's pure
@@ -1635,14 +1624,10 @@ impl TreeWalkEngine {
                                     current_node,
                                 };
                                 match s {
-                                    Some(s) => native_ops::apply_handler_impl(
-                                        &mut ctx,
-                                        &ret,
-                                        &[val, s],
-                                    )?,
-                                    None => {
-                                        native_ops::apply_handler_impl(&mut ctx, &ret, &[val])?
+                                    Some(s) => {
+                                        native_ops::apply_handler_impl(&mut ctx, &ret, &[val, s])?
                                     }
+                                    None => native_ops::apply_handler_impl(&mut ctx, &ret, &[val])?,
                                 }
                             }
                             (None, Some(s)) => pair(val, s),
@@ -2059,18 +2044,18 @@ impl TreeWalkEngine {
                     current_node,
                     incoming,
                 )?;
-                if let Some(tag) = equiv_val.get("__tag__").and_then(|v| v.as_str()) {
-                    if tag == "Equiv" {
-                        let a = equiv_val.get("a").cloned().unwrap_or(TaggedValue::Null);
-                        let b = equiv_val.get("b").cloned().unwrap_or(TaggedValue::Null);
-                        let path = equiv_val.get("path").cloned().unwrap_or(TaggedValue::Null);
-                        let mut map = FxHashMap::default();
-                        map.insert(Rc::from("__tag__"), TaggedValue::Str(Rc::from("Path")));
-                        map.insert(Rc::from("a"), a);
-                        map.insert(Rc::from("b"), b);
-                        map.insert(Rc::from("path"), path);
-                        return Ok((TaggedValue::Obj(Rc::new(map)), false));
-                    }
+                if let Some(tag) = equiv_val.get("__tag__").and_then(|v| v.as_str())
+                    && tag == "Equiv"
+                {
+                    let a = equiv_val.get("a").cloned().unwrap_or(TaggedValue::Null);
+                    let b = equiv_val.get("b").cloned().unwrap_or(TaggedValue::Null);
+                    let path = equiv_val.get("path").cloned().unwrap_or(TaggedValue::Null);
+                    let mut map = FxHashMap::default();
+                    map.insert(Rc::from("__tag__"), TaggedValue::Str(Rc::from("Path")));
+                    map.insert(Rc::from("a"), a);
+                    map.insert(Rc::from("b"), b);
+                    map.insert(Rc::from("path"), path);
+                    return Ok((TaggedValue::Obj(Rc::new(map)), false));
                 }
                 Ok((equiv_val, false))
             }
@@ -2154,19 +2139,19 @@ impl TreeWalkEngine {
                     current_node,
                     incoming.clone(),
                 )?;
-                if let Some(tag) = path_val.get("__tag__").and_then(|v| v.as_str()) {
-                    if tag == "Path" || tag == "Rewrite" {
-                        let motive_val = self.eval_scheme_tagged_td(
-                            &motive,
-                            ast,
-                            node_ref,
-                            lang,
-                            env,
-                            current_node,
-                            Some(base_val),
-                        )?;
-                        return Ok((motive_val, false));
-                    }
+                if let Some(tag) = path_val.get("__tag__").and_then(|v| v.as_str())
+                    && (tag == "Path" || tag == "Rewrite")
+                {
+                    let motive_val = self.eval_scheme_tagged_td(
+                        &motive,
+                        ast,
+                        node_ref,
+                        lang,
+                        env,
+                        current_node,
+                        Some(base_val),
+                    )?;
+                    return Ok((motive_val, false));
                 }
                 Ok((base_val, false))
             }
@@ -2317,21 +2302,20 @@ impl TreeWalkEngine {
             ArrSource::Native | ArrSource::Foreign(_) => Some(op.to_string()),
             _ => None,
         };
-        if !from_payload {
-            if let Some(name) = dispatch_name {
-                if let Some(res) = self.dispatch_op(
-                    &name,
-                    dim_label.as_deref(),
-                    incoming.as_ref(),
-                    ast,
-                    node_ref,
-                    lang,
-                    env,
-                    current_node,
-                )? {
-                    return Ok(res);
-                }
-            }
+        if !from_payload
+            && let Some(name) = dispatch_name
+            && let Some(res) = self.dispatch_op(
+                &name,
+                dim_label.as_deref(),
+                incoming.as_ref(),
+                ast,
+                node_ref,
+                lang,
+                env,
+                current_node,
+            )?
+        {
+            return Ok(res);
         }
         match source {
             ArrSource::Native => {
@@ -2505,10 +2489,17 @@ impl TreeWalkEngine {
             // written back to the frame. (Serialized-Term impls below
             // keep the plain single-incoming convention.)
             if let Some(acc) = native_ops::covering_frame_acc(&self.handler_stack.borrow(), op) {
-                let out =
-                    self.apply_app(&impl_val, &[inc, acc], ast, lang, env, node_ref, current_node)?;
-                let (res, s2) = native_ops::acc_result_split(out, op)
-                    .map_err(|e| e.with_node(current_node))?;
+                let out = self.apply_app(
+                    &impl_val,
+                    &[inc, acc],
+                    ast,
+                    lang,
+                    env,
+                    node_ref,
+                    current_node,
+                )?;
+                let (res, s2) =
+                    native_ops::acc_result_split(out, op).map_err(|e| e.with_node(current_node))?;
                 native_ops::covering_frame_set_acc(
                     self.handler_stack.borrow_mut().as_mut_slice(),
                     op,
@@ -2650,7 +2641,7 @@ impl TreeWalkEngine {
                 journal.node_ref,
                 lang,
                 &mut run_env,
-                &node,
+                node,
                 journal.incoming.clone(),
             ) {
                 Ok((val, pushed)) => {
@@ -2675,7 +2666,7 @@ impl TreeWalkEngine {
                         lang,
                         env,
                         journal.node_ref,
-                        &node,
+                        node,
                     );
                 }
                 Ok(val)
@@ -2684,14 +2675,11 @@ impl TreeWalkEngine {
                 if let Some(id) = e.suspension_id() {
                     let susp = RESUME_SUSPENSIONS.with(|t| t.borrow().get(&id).cloned());
                     if let Some(susp) = susp.filter(|s| s.journal.id == journal.id) {
-                        let impl_val =
-                            native_ops::handler_impl(&journal.handler, &susp.op).ok_or_else(|| {
+                        let impl_val = native_ops::handler_impl(&journal.handler, &susp.op)
+                            .ok_or_else(|| {
                                 LangError::engine_node(
-                                    format!(
-                                        "resume: no impl for suspended op '{}'",
-                                        susp.op
-                                    ),
-                                    &node,
+                                    format!("resume: no impl for suspended op '{}'", susp.op),
+                                    node,
                                 )
                             })?;
                         // The clause gets `(payload, resume)`; its result
@@ -2704,7 +2692,7 @@ impl TreeWalkEngine {
                             lang,
                             env,
                             journal.node_ref,
-                            &node,
+                            node,
                         );
                     }
                 }
@@ -2780,9 +2768,8 @@ impl TreeWalkEngine {
             return Ok(None);
         };
         let jid = *jid as u64;
-        let journal = RESUME_JOURNALS.with(|js| {
-            js.borrow().iter().rev().find(|j| j.id == jid).cloned()
-        });
+        let journal =
+            RESUME_JOURNALS.with(|js| js.borrow().iter().rev().find(|j| j.id == jid).cloned());
         let Some(journal) = journal else {
             return Ok(None);
         };
@@ -2841,8 +2828,7 @@ impl TreeWalkEngine {
             })?;
         let j = &susp.journal;
         let prefix_len = susp.index.min(j.entries.borrow().len());
-        let mut entries: Vec<(Rc<str>, TaggedValue)> =
-            j.entries.borrow()[..prefix_len].to_vec();
+        let mut entries: Vec<(Rc<str>, TaggedValue)> = j.entries.borrow()[..prefix_len].to_vec();
         entries.push((Rc::clone(&susp.op), x));
         let j2 = Rc::new(ResumeJournal {
             id: next_resume_id(),
@@ -3063,12 +3049,11 @@ impl TreeWalkEngine {
                     if pushed {
                         env.pop_scope();
                     }
-                    if result.get("__tag__").is_none() {
-                        if let Some(output) = op_decl.get("output").and_then(Value::as_str) {
-                            if let Some(tagged) = tag_value(output, &tagged_to_value(&result)) {
-                                result = TaggedValue::from(tagged);
-                            }
-                        }
+                    if result.get("__tag__").is_none()
+                        && let Some(output) = op_decl.get("output").and_then(Value::as_str)
+                        && let Some(tagged) = tag_value(output, &tagged_to_value(&result))
+                    {
+                        result = TaggedValue::from(tagged);
                     }
                     return Ok((result, false));
                 }
@@ -3085,9 +3070,7 @@ impl TreeWalkEngine {
                     // Multi-shot first: a journal-bound ≥2-ary clause
                     // replays a journaled result or suspends
                     // (`LangError::Suspended`) to the `handle` driver.
-                    if let Some(v) =
-                        self.journal_perform_or_suspend(&arg_tvs, current_node)?
-                    {
+                    if let Some(v) = self.journal_perform_or_suspend(&arg_tvs, current_node)? {
                         return Ok((v, false));
                     }
                     let mut ctx = TwCtx {
@@ -3297,7 +3280,7 @@ impl TreeWalkEngine {
                             assertion: "assert".to_string(),
                             expected: expected_json,
                             actual: actual_json,
-                            diff: diff,
+                            diff,
                             message: format!(
                                 "assertion failed: {:?} != {:?}",
                                 target_val, value_val
@@ -3356,8 +3339,15 @@ impl TreeWalkEngine {
                     vec![input.clone()]
                 };
                 if let Some(name) = callee.as_str() {
-                    let val =
-                        self.call_host_fn(name, &actual_args, ast, node_ref, lang, env, current_node)?;
+                    let val = self.call_host_fn(
+                        name,
+                        &actual_args,
+                        ast,
+                        node_ref,
+                        lang,
+                        env,
+                        current_node,
+                    )?;
                     Ok((val, false))
                 } else {
                     let val = self.apply_app(
@@ -3373,7 +3363,7 @@ impl TreeWalkEngine {
                 }
             }
             "record" => {
-                if args.len() % 2 != 0 {
+                if !args.len().is_multiple_of(2) {
                     return Err(LangError::engine_node(
                         format!(
                             "record: expected even number of arguments, got {}",
@@ -3411,6 +3401,7 @@ impl TreeWalkEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Apply an `App` callee: closure application only (ADR-0060).
     /// Call a host function by name (string callee). This is the
     /// `App`/`>>>` dispatch path for string callees — mirrors the
@@ -3470,6 +3461,7 @@ impl TreeWalkEngine {
         Ok(TaggedValue::from(val))
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Apply a callable value to `args`: `arr <op>` dispatch objects,
     /// bound-arrow records (`{__term__, __bound__}`), `>>>` composite
     /// records, and `TaggedValue::Arrow` closures.
@@ -3519,17 +3511,25 @@ impl TreeWalkEngine {
         // suspended `handle` body. Intercepted before the
         // dispatch-object/`__term__`/Arrow arms — the reserved-key
         // convention is the same (`__term__`, `__arr__`).
-        if let TaggedValue::Obj(map) = callee {
-            if let Some(id_val) = map.get(RESUME_KEY) {
-                let id = resume_id_of(id_val).ok_or_else(|| {
-                    LangError::engine_node(
-                        format!("resume: malformed resumption value {id_val:?}"),
-                        current_node,
-                    )
-                })?;
-                let x = args.first().cloned().unwrap_or(TaggedValue::Null);
-                return self.resume_suspension(id, x, lang, env, current_node);
+        if let TaggedValue::Obj(map) = callee
+            && let Some(id_val) = map.get(RESUME_KEY)
+        {
+            let id = resume_id_of(id_val).ok_or_else(|| {
+                LangError::engine_node(
+                    format!("resume: malformed resumption value {id_val:?}"),
+                    current_node,
+                )
+            })?;
+            let x = args.first().cloned().unwrap_or(TaggedValue::Null);
+            // A `resume` value minted by a *different* engine (the
+            // cranelift backend applies arrow values through this
+            // interpreter) carries an id in that engine's namespace;
+            // its driver is registered in the shared table. Fall
+            // through to the local table for ids this engine minted.
+            if let Some(driven) = native_ops::drive_shared_resumption(id, x.clone()) {
+                return driven;
             }
+            return self.resume_suspension(id, x, lang, env, current_node);
         }
         // First-class `arr <op>` dispatch object: apply the op to the args.
         if let Some(inner) = callee.get(ARR_DISPATCH_TAG) {
@@ -3567,23 +3567,14 @@ impl TreeWalkEngine {
             // args, then `second` on the result — `x ~> second(first(x))`.
             // A `second` that is a bare string is a host-function name and
             // dispatches through `call_host_fn`.
-            if map.get("__tag__").and_then(|t| t.as_str()) == Some("Arrow") {
-                if let (Some(first), Some(second)) = (map.get("first"), map.get("second")) {
-                    let mid =
-                        self.apply_app(first, args, ast, lang, env, node_ref, current_node)?;
-                    if let Some(name) = second.as_str() {
-                        return self.call_host_fn(
-                            name,
-                            &[mid],
-                            ast,
-                            node_ref,
-                            lang,
-                            env,
-                            current_node,
-                        );
-                    }
-                    return self.apply_app(second, &[mid], ast, lang, env, node_ref, current_node);
+            if map.get("__tag__").and_then(|t| t.as_str()) == Some("Arrow")
+                && let (Some(first), Some(second)) = (map.get("first"), map.get("second"))
+            {
+                let mid = self.apply_app(first, args, ast, lang, env, node_ref, current_node)?;
+                if let Some(name) = second.as_str() {
+                    return self.call_host_fn(name, &[mid], ast, node_ref, lang, env, current_node);
                 }
+                return self.apply_app(second, &[mid], ast, lang, env, node_ref, current_node);
             }
             if let Some(term_val) = map.get("__term__") {
                 let mut elems: Vec<TaggedValue> = Vec::new();
@@ -3833,8 +3824,8 @@ impl TreeWalkEngine {
             );
         }
         let _guard = HandlerStackGuard::push(&self.handler_stack, handlers.iter().cloned());
-        let result = self.eval_node_inner(&def_ast, body_ref, lang, &mut arrow_env);
-        result
+
+        self.eval_node_inner(&def_ast, body_ref, lang, &mut arrow_env)
     }
 
     /// Evaluate a single node by looking up its eval scheme and
@@ -3940,6 +3931,7 @@ impl TreeWalkEngine {
 
     /// Backward-compatible alias for [`eval_scheme`](Self::eval_scheme).
     #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
     pub fn eval_scheme_v2(
         &self,
         scheme: &Term,
@@ -4026,6 +4018,13 @@ impl TreeWalkEngine {
         if ast_rc.is_empty() {
             return Ok(TaggedValue::Null);
         }
+        // Finalize the multi-shot `resume` tables when the outermost eval on
+        // this thread ends (ADR-0158): suspensions stay live during the eval
+        // so an escaped `resume` remains callable, then are reclaimed here.
+        let _resume_scope = native_ops::ResumeTableScope::enter(|| {
+            RESUME_JOURNALS.with(|j| j.borrow_mut().clear());
+            RESUME_SUSPENSIONS.with(|s| s.borrow_mut().clear());
+        });
         // Set thread-locals so host functions can call arrow-values via
         // ctx.try_call_value (see TreeWalkCallable below). Save the previous
         // values so a *nested* eval (a `.hnl` module function calling into
@@ -4285,13 +4284,13 @@ impl ValueModel {
         }
 
         // e. Fall back to language-level handlers keyed by grade.
-        if impl_json.is_none() {
-            if let Some(ref grade) = required_grade {
-                impl_json = ctx
-                    .lang
-                    .handler_for_grade(grade)
-                    .and_then(|h| h.get("impls").and_then(|m| m.get(op)).cloned());
-            }
+        if impl_json.is_none()
+            && let Some(ref grade) = required_grade
+        {
+            impl_json = ctx
+                .lang
+                .handler_for_grade(grade)
+                .and_then(|h| h.get("impls").and_then(|m| m.get(op)).cloned());
         }
 
         // f. No handler found — let the caller fall back to native dispatch.
@@ -4299,8 +4298,8 @@ impl ValueModel {
             return Ok(None);
         };
 
-        let impl_term: Term = serde_json::from_value(impl_json)
-            .map_err(|_| hnl_engine::LangError::NotImplemented)?;
+        let impl_term: Term =
+            serde_json::from_value(impl_json).map_err(|_| hnl_engine::LangError::NotImplemented)?;
         // Feed the handler the incoming value paired with the evaluated
         // args so it can consume them.
         let handler_in = if arg_vals.is_empty() {
@@ -4330,15 +4329,15 @@ impl Model for ValueModel {
         // the result. On `NotImplemented` we fall through to the
         // existing match arms below, which remain as fallbacks so a
         // default `ValueModel` (no delegate) behaves exactly as before.
-        if let Some(delegate) = &self.1 {
-            if is_hott_tag(term) {
-                match delegate.run(term, incoming.clone(), ctx) {
-                    Ok(v) => return Ok(v),
-                    // `hnl_engine::LangError` is currently single-variant
-                    // (`NotImplemented`); fall through to the native match
-                    // arms so the delegate is strictly opt-in.
-                    Err(_) => { /* fall through */ }
-                }
+        if let Some(delegate) = &self.1
+            && is_hott_tag(term)
+        {
+            match delegate.run(term, incoming.clone(), ctx) {
+                Ok(v) => return Ok(v),
+                // `hnl_engine::LangError` is currently single-variant
+                // (`NotImplemented`); fall through to the native match
+                // arms so the delegate is strictly opt-in.
+                Err(_) => { /* fall through */ }
             }
         }
         // Mirror the model-level handler stack into the engine's runtime
@@ -4602,20 +4601,20 @@ impl Model for ValueModel {
                 let a_val = self.run(&a_term, incoming.clone(), ctx)?;
                 let b_val = self.run(&b_term, incoming.clone(), ctx)?;
                 let mut eq = a_val == b_val;
-                if let Some(p) = td.get_term("path") {
-                    if !p.as_value().is_null() {
-                        let p_term = p
-                            .to_term()
-                            .map_err(|_| hnl_engine::LangError::NotImplemented)?;
-                        let p_val = self.run(&p_term, incoming, ctx)?;
-                        if let Value::Object(obj) = &p_val {
-                            if obj.get("__tag__").and_then(Value::as_str) == Some("Path") {
-                                let from = obj.get("from");
-                                let to = obj.get("to");
-                                if from == Some(&a_val) && to == Some(&b_val) {
-                                    eq = true;
-                                }
-                            }
+                if let Some(p) = td.get_term("path")
+                    && !p.as_value().is_null()
+                {
+                    let p_term = p
+                        .to_term()
+                        .map_err(|_| hnl_engine::LangError::NotImplemented)?;
+                    let p_val = self.run(&p_term, incoming, ctx)?;
+                    if let Value::Object(obj) = &p_val
+                        && obj.get("__tag__").and_then(Value::as_str) == Some("Path")
+                    {
+                        let from = obj.get("from");
+                        let to = obj.get("to");
+                        if from == Some(&a_val) && to == Some(&b_val) {
+                            eq = true;
                         }
                     }
                 }
@@ -5150,10 +5149,10 @@ fn either_left_val(v: &TaggedValue) -> Option<TaggedValue> {
     if let TaggedValue::EitherLeft(inner) = v {
         return Some(inner.as_ref().clone());
     }
-    if let TaggedValue::Obj(map) = v {
-        if map.get("__either__").and_then(|s| s.as_str()) == Some("left") {
-            return map.get("value").cloned();
-        }
+    if let TaggedValue::Obj(map) = v
+        && map.get("__either__").and_then(|s| s.as_str()) == Some("left")
+    {
+        return map.get("value").cloned();
     }
     None
 }
@@ -5163,10 +5162,10 @@ fn either_right_val(v: &TaggedValue) -> Option<TaggedValue> {
     if let TaggedValue::EitherRight(inner) = v {
         return Some(inner.as_ref().clone());
     }
-    if let TaggedValue::Obj(map) = v {
-        if map.get("__either__").and_then(|s| s.as_str()) == Some("right") {
-            return map.get("value").cloned();
-        }
+    if let TaggedValue::Obj(map) = v
+        && map.get("__either__").and_then(|s| s.as_str()) == Some("right")
+    {
+        return map.get("value").cloned();
     }
     None
 }
@@ -5219,9 +5218,9 @@ mod tests {
     use super::*;
     use handl_language::{AstNode, AstShapeDef, ChildRoleSpec, EvalSchemeDef, Language, Term};
     use handl_platform::{EvalContext, Function, Module, ModuleLookup};
+    use handl_plugin_module::ModuleRegistry;
     use hnl_engine_exec::EvalRequest;
     use hnl_engine_exec::native_ops::Num;
-    use handl_plugin_module::ModuleRegistry;
     use serde_json::json;
 
     // --- v2 scheme constructor helpers ---
@@ -8117,7 +8116,11 @@ mod tests {
             ))
             .unwrap();
         lang.eval
-            .merge(EvalSchemeDef::new("e.array", "array", prim("array", vec![])))
+            .merge(EvalSchemeDef::new(
+                "e.array",
+                "array",
+                prim("array", vec![]),
+            ))
             .unwrap();
         lang.eval
             .merge(EvalSchemeDef::new(
@@ -8184,22 +8187,22 @@ mod tests {
             AstNode::new("value").with_payload(json!(2)),       // 3
             AstNode::new("array").with_payload(json!({"children": [2, 3]})), // 4: [1,2]
             AstNode::new("call").with_payload(json!({"children": [0, 1, 4]})), // 5: perform(choose,[1,2])
-            AstNode::new("value").with_payload(json!(100)),     // 6
+            AstNode::new("value").with_payload(json!(100)),                    // 6
             AstNode::new("binary.add").with_payload(json!({"children": [5, 6]})), // 7: BODY
-            AstNode::new("var").with_payload(json!("resume")),  // 8
-            AstNode::new("var").with_payload(json!("opts")),    // 9
-            AstNode::new("value").with_payload(json!(0)),       // 10
-            AstNode::new("idx").with_payload(json!({"children": [9, 10]})), // 11: opts[0]
+            AstNode::new("var").with_payload(json!("resume")),                 // 8
+            AstNode::new("var").with_payload(json!("opts")),                   // 9
+            AstNode::new("value").with_payload(json!(0)),                      // 10
+            AstNode::new("idx").with_payload(json!({"children": [9, 10]})),    // 11: opts[0]
             AstNode::new("call").with_payload(json!({"children": [8, 11]})), // 12: resume(opts[0])
-            AstNode::new("value").with_payload(json!(1)),       // 13
-            AstNode::new("idx").with_payload(json!({"children": [9, 13]})), // 14: opts[1]
+            AstNode::new("value").with_payload(json!(1)),                    // 13
+            AstNode::new("idx").with_payload(json!({"children": [9, 13]})),  // 14: opts[1]
             AstNode::new("call").with_payload(json!({"children": [8, 14]})), // 15: resume(opts[1])
             AstNode::new("array").with_payload(json!({"children": [12, 15]})), // 16: clause body
             AstNode::new("function")
                 .with_payload(json!({"params": ["opts", "resume"], "body": 16})), // 17
-            AstNode::new("key").with_payload(json!("choose")),  // 18: entry key
+            AstNode::new("key").with_payload(json!("choose")),               // 18: entry key
             AstNode::new("entry").with_payload(json!({"children": [18, 17]})), // 19
-            AstNode::new("object").with_payload(json!({"children": [19]})), // 20: handler
+            AstNode::new("object").with_payload(json!({"children": [19]})),  // 20: handler
             AstNode::new("handle").with_payload(json!({"children": [7, 20]})), // 21: root
         ]);
         let req = EvalRequest::new(ast);
@@ -8263,18 +8266,16 @@ mod tests {
             AstNode::new("var").with_payload(json!("puts")),    // 1
             AstNode::new("value").with_payload(json!("hi")),    // 2
             AstNode::new("call").with_payload(json!({"children": [0, 1, 2]})), // 3: perform(puts,"hi")
-            AstNode::new("var").with_payload(json!("s")),       // 4: clause body
-            AstNode::new("function")
-                .with_payload(json!({"params": ["s"], "body": 4})), // 5: 1-ary impl
-            AstNode::new("key").with_payload(json!("puts")),    // 6
-            AstNode::new("entry").with_payload(json!({"children": [6, 5]})), // 7
-            AstNode::new("object").with_payload(json!({"children": [7]})), // 8
-            AstNode::new("handle").with_payload(json!({"children": [3, 8]})), // 9: root
+            AstNode::new("var").with_payload(json!("s")),                      // 4: clause body
+            AstNode::new("function").with_payload(json!({"params": ["s"], "body": 4})), // 5: 1-ary impl
+            AstNode::new("key").with_payload(json!("puts")),                            // 6
+            AstNode::new("entry").with_payload(json!({"children": [6, 5]})),            // 7
+            AstNode::new("object").with_payload(json!({"children": [7]})),              // 8
+            AstNode::new("handle").with_payload(json!({"children": [3, 8]})),           // 9: root
         ]);
         let req = EvalRequest::new(ast);
         assert_eq!(engine.eval(&lang, &req).unwrap(), json!("hi"));
     }
-
 }
 // ---------------------------------------------------------------------------
 // ADR-0106 item 2 — `body_def` arena memo (`cached_def_arena`)
@@ -8456,5 +8457,4 @@ mod arrow_arena_cache_tests {
         assert!(result.is_ok());
         assert!(CURRENT_LANG.with(|c| c.borrow().is_none()));
     }
-
 }
