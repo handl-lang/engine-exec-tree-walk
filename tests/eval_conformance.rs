@@ -9,10 +9,10 @@ use std::rc::Rc;
 
 use handl_language::Value;
 use handl_platform::{EvalContext, Function, Module, ModuleLookup};
-use hnl_engine_exec::{EvalEngine, EvalRequest};
-use hnl_engine_exec_tree_walk::TreeWalkEngine;
 use handl_plugin_module::ModuleRegistry;
 use handl_test_utils::conformance::{eval_corpus, run_eval_conformance};
+use hnl_engine_exec::{EvalEngine, EvalRequest};
+use hnl_engine_exec_tree_walk::TreeWalkEngine;
 
 /// A host function that doubles its integer argument (matches the "double"
 /// function expected by the "foreign" conformance case).

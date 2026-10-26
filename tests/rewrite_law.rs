@@ -5,19 +5,15 @@
 //! target terms are run and compared.
 
 use handl_language::{ArrSource, Ast, Language, Term, Value};
-use hnl_engine_exec_tree_walk::{TreeWalkEngine, ValueModel};
 use hnl_engine::{Model, ModelCtx, RewriteResult, RewriteWitness, TermData};
+use hnl_engine_exec_tree_walk::{TreeWalkEngine, ValueModel};
 use serde_json::json;
 
 fn t(td: TermData) -> Term {
     td.to_term().expect("TermData -> Term conversion")
 }
 
-fn model_ctx<'a>(
-    lang: &'a Language,
-    ast: &'a Ast,
-    node: &'a hnl_engine::AstNode,
-) -> ModelCtx<'a> {
+fn model_ctx<'a>(lang: &'a Language, ast: &'a Ast, node: &'a hnl_engine::AstNode) -> ModelCtx<'a> {
     let lang_view: &dyn hnl_engine::LanguageView = lang;
     let ast_view: &dyn hnl_engine::AstView = ast;
     ModelCtx {

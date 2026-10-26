@@ -1,8 +1,8 @@
 //! Path, equivalence, and transport semantics for `ValueModel` (ADR-0100).
 
 use handl_language::{Ast, Language, Term};
-use hnl_engine_exec_tree_walk::{TreeWalkEngine, ValueModel};
 use hnl_engine::{Model, ModelCtx, TermData};
+use hnl_engine_exec_tree_walk::{TreeWalkEngine, ValueModel};
 use serde_json::json;
 
 /// Convert `TermData` back to `Term` for engine APIs that require `Term`.

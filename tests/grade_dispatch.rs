@@ -4,8 +4,8 @@
 //! drives them through `ValueModel::dispatch_op`.
 
 use handl_language::{ArrSource, Ast, Language, Term, Value};
-use hnl_engine_exec_tree_walk::{TreeWalkEngine, ValueModel};
 use hnl_engine::{Model, ModelCtx, TermData};
+use hnl_engine_exec_tree_walk::{TreeWalkEngine, ValueModel};
 use serde_json::json;
 
 /// Convert `TermData` back to `Term` for engine APIs that require `Term`.

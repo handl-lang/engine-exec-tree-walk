@@ -9,9 +9,9 @@
 use handl_language::{
     ArrSource, Ast, AstNode, AstShapeDef, ChildRoleSpec, EvalSchemeDef, Language, Term, Value,
 };
+use hnl_engine::TermData;
 use hnl_engine_exec::{EvalEngine, EvalRequest};
 use hnl_engine_exec_tree_walk::TreeWalkEngine;
-use hnl_engine::TermData;
 use serde_json::json;
 
 // --- TermData helpers (mirrors `Term` convenience constructors) ------------
