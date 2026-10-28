@@ -1,9 +1,19 @@
 # engine-exec-tree-walk
 
-`hnl-engine-exec-tree-walk` — The **reference interpreter** for the eval operation (ADR-0044 §3, §4, ADR-0052). Interprets the arrow-calculus [`handl_language::Term`] kernel directly via tree-walking: it looks ...
+`hnl-engine-exec-tree-walk` — The **reference interpreter** for the eval operation (ADR-0044 §3, §4, ADR-0052). Interprets the arrow-calculus `Term` kernel directly by tree-walking: it reads `lang.eval[node.kind]` and evaluates the resulting scheme with the shared native-op table.
 
-Sibling-repo deps are git dependencies (`branch = "main"`); the `[patch]`
-tables resolve them from sibling checkouts for local development.
+## Development
+
+```bash
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+```
+
+`ci.sh` is the gate (fmt → clippy → test → doc). Deps resolve from git, so no
+sibling checkouts are needed; a plain clone test-runs as-is.
+
+## License
+
+MIT.
 
 ## Documentation
 
