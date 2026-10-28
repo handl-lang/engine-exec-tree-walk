@@ -353,7 +353,7 @@ impl EvalFrame {
     /// [`EvalEngine::eval`], so nested `ctx.try_call_value` /
     /// `TreeWalkCallable` calls inside the body see the innermost frame.
     ///
-    /// Restoration is panic-safe: a [`TlRestoreGuard`] restores the previous
+    /// Restoration is panic-safe: a `TlRestoreGuard` restores the previous
     /// thread-locals on drop, so an unwinding panic cannot leave this frame's
     /// language/modules/globals installed for whatever runs next on the
     /// thread (e.g. a test-runner worker that catches panics and reuses the
@@ -4152,7 +4152,7 @@ impl EvalEngine for TreeWalkEngine {
 /// # ADR-0103 continuation: arrow-model delegation
 ///
 /// The optional second field (`arrow_model_delegate`) is a Handl-authored
-/// `Model` (e.g. [`HandlModelAdapter`](handl_plugin_lib_handl::HandlModelAdapter)
+/// `Model` (e.g. `handl_plugin_lib_handl::HandlModelAdapter`
 /// wrapping `arrow_model.hnl`). When set via
 /// [`ValueModel::with_arrow_model_delegate`], [`Model::run`] delegates
 /// HoTT-type terms — those for which [`hnl_engine::is_hott_tag`]
