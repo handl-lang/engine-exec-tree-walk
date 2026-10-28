@@ -112,14 +112,14 @@ use handl_value::{
     cell2_whisker, record_proj, tagged_to_value,
 };
 use hnl_engine::{Model, ModelCtx, RewriteResult, TermData, is_hott_tag};
-use hnl_engine_exec::services::{
-    CURRENT_GLOBALS, CURRENT_IMPORT_RESOLVER, CURRENT_LANG, CURRENT_MODULES, TlRestoreGuard,
-};
 pub use hnl_engine_exec::EvalFrame;
 use hnl_engine_exec::native_ops::{
     self, NativeOpCtx, OpService, build_loop_step_args, is_truthy, loop_step_outcome, step_decision,
 };
 use hnl_engine_exec::pattern_match::{self, PatternMatchCtx};
+use hnl_engine_exec::services::{
+    CURRENT_GLOBALS, CURRENT_IMPORT_RESOLVER, CURRENT_LANG, CURRENT_MODULES, TlRestoreGuard,
+};
 use hnl_engine_exec::{EvalEngine, EvalRequest, ImportResolver};
 
 /// The globular dimension of a term (ADR-0120 Phase 5) — delegates to
@@ -315,8 +315,6 @@ impl Drop for JournalGuard {
 // ---------------------------------------------------------------------------
 // EvalFrame — ambient eval services for cross-runtime arrow application
 // ---------------------------------------------------------------------------
-
-
 
 /// RAII guard for [`TreeWalkEngine::handler_stack`] pushes: pops the pushed
 /// handlers on drop — including during panic unwinding, so a panicking
