@@ -28,4 +28,4 @@ handl-test-utils = { git = "https://github.com/handl-lang/host", branch = "main"
 handl-plugin-module = { git = "https://github.com/handl-lang/host", branch = "main" }
 hnl-engine-exec-bytecode = { git = "https://github.com/handl-lang/engine-exec-bytecode", branch = "main" }
 serde_json = "1"
-handl-kit-data-prelude = { git = "https://github.com/handl-lang/kit-data-prelude", branch = "main" }
+handl-kit-data-prelude = { git = "https://github.com/handl-lang/host", branch = "main" }
