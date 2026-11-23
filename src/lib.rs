@@ -3087,12 +3087,21 @@ impl TreeWalkEngine {
                             let mut closure_env = ScopeStack::new();
                             closure_env.captured = Some(binds);
                             closure_env.globals = Rc::clone(&env.globals);
+                            let cov_source =
+                                hnl_engine_exec::coverage::CoverageSession::source_for_body(
+                                    Rc::as_ptr(&body_def) as usize,
+                                );
+                            let cov_guard = cov_source.and_then(
+                                hnl_engine_exec::coverage::CoverageSession::push_arrow_source,
+                            );
                             let body_val = self.eval_node_inner(
                                 &def_ast,
                                 AstRef::new(def_ast.len() - 1),
                                 lang,
                                 &mut closure_env,
-                            )?;
+                            );
+                            drop(cov_guard);
+                            let body_val = body_val?;
                             Ok((body_val, false))
                         }
                         _ => Err(LangError::engine_node(
@@ -3721,7 +3730,23 @@ impl TreeWalkEngine {
         }
         let _guard = HandlerStackGuard::push(&self.handler_stack, handlers.iter().cloned());
 
-        self.eval_node_inner(&def_ast, body_ref, lang, &mut arrow_env)
+        // Coverage (opt-in): resolve which registered source this arrow's
+        // `body_def` arena spans index into (recorded at `closure`-mint
+        // time) and mark hits as arrow-body (declaration *call*) hits.
+        // Unmapped `body_def`s (JSON-round-tripped arrows, coverage
+        // installed after mint) simply record under the ambient frame.
+        let cov_source = hnl_engine_exec::coverage::CoverageSession::source_for_body(Rc::as_ptr(
+            body_def,
+        )
+            as usize);
+        let cov_guard =
+            cov_source.and_then(hnl_engine_exec::coverage::CoverageSession::push_arrow_source);
+        if let Some(id) = cov_source {
+            hnl_engine_exec::coverage::record_arrow_application(id);
+        }
+        let result = self.eval_node_inner(&def_ast, body_ref, lang, &mut arrow_env);
+        drop(cov_guard);
+        result
     }
 
     /// Evaluate a single node by looking up its eval scheme and
@@ -3770,6 +3795,10 @@ impl TreeWalkEngine {
         env: &mut ScopeStack,
     ) -> Result<TaggedValue, LangError> {
         let node = ast.at(node_ref)?;
+        // Coverage (opt-in): record this node's span hit against the
+        // innermost active coverage source. No-op when no session is
+        // installed.
+        hnl_engine_exec::coverage::record_node_span(node.span.map(|s| (s.start, s.end)));
         let scheme_def = lang.eval.get_by_identity(&node.kind);
         match scheme_def {
             Some(def) => self.eval_scheme_tagged(&def.scheme, ast, node_ref, lang, env, node, None),
