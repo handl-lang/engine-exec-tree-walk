@@ -1,4 +1,4 @@
-//! # hnl-engine-exec-tree-walk
+//! # hnl-exec-tree-walk
 //!
 //! The **reference interpreter** for the eval operation (ADR-0044 §3, §4,
 //! ADR-0052). Interprets the arrow-calculus [`handl_language::Term`]
@@ -112,15 +112,15 @@ use handl_value::{
     cell2_whisker, record_proj, tagged_to_value,
 };
 use hnl_engine::{Model, ModelCtx, RewriteResult, TermData, is_hott_tag};
-pub use hnl_engine_exec::EvalFrame;
-use hnl_engine_exec::native_ops::{
+pub use hnl_exec::EvalFrame;
+use hnl_exec::native_ops::{
     self, NativeOpCtx, OpService, build_loop_step_args, is_truthy, loop_step_outcome, step_decision,
 };
-use hnl_engine_exec::pattern_match::{self, PatternMatchCtx};
-use hnl_engine_exec::services::{
+use hnl_exec::pattern_match::{self, PatternMatchCtx};
+use hnl_exec::services::{
     CURRENT_GLOBALS, CURRENT_IMPORT_RESOLVER, CURRENT_LANG, CURRENT_MODULES, TlRestoreGuard,
 };
-use hnl_engine_exec::{EvalEngine, EvalRequest, ImportResolver};
+use hnl_exec::{EvalEngine, EvalRequest, ImportResolver};
 
 /// The globular dimension of a term (ADR-0120 Phase 5) — delegates to
 /// [`TermData::globular_dim`], the shared implementation. `Seq{axis: k}`
@@ -364,7 +364,7 @@ const ARROW_ARENA_CACHE_CAP: usize = 64;
 /// or a `handle … with` reinstalling deep handlers each level — would
 /// overflow the platform stack at a few thousand calls. Checking at the
 /// two recursion funnels bounds eval depth by total growable stack.
-/// Mirrors `hnl-engine-typecheck-nbe`'s `STACK_RED_ZONE`.
+/// Mirrors `hnl-tool-typecheck-nbe`'s `STACK_RED_ZONE`.
 const STACK_RED_ZONE: usize = 4 * 1024 * 1024;
 
 /// Fresh stack segment allocated by [`stacker::maybe_grow`] on overflow
@@ -2755,7 +2755,7 @@ impl TreeWalkEngine {
     /// carried sub-schemes only when the shared [`step_decision`]
     /// semantics need them (e.g. `while_step` never runs `body` once the
     /// condition fails). The decision itself is defined once in
-    /// `hnl-engine-exec::native_ops`.
+    /// `hnl-exec::native_ops`.
     #[allow(clippy::too_many_arguments)]
     fn eval_derived_step(
         &self,
@@ -2848,7 +2848,7 @@ impl TreeWalkEngine {
     /// pushed (`extend_env` pushes).
     ///
     /// The op semantics are defined once in
-    /// `hnl-engine-exec::native_ops` (ADR-0044 §7): this engine supplies
+    /// `hnl-exec::native_ops` (ADR-0044 §7): this engine supplies
     /// only the globals — the `ScopeStack`, AST-node evaluation, and arrow
     /// application — through [`TwCtx`]. The residual `match` below owns
     /// ops that still require this engine's deeper machinery (imports,
@@ -3088,11 +3088,11 @@ impl TreeWalkEngine {
                             closure_env.captured = Some(binds);
                             closure_env.globals = Rc::clone(&env.globals);
                             let cov_source =
-                                hnl_engine_exec::coverage::CoverageSession::source_for_body(
+                                hnl_exec::coverage::CoverageSession::source_for_body(
                                     Rc::as_ptr(&body_def) as usize,
                                 );
                             let cov_guard = cov_source.and_then(
-                                hnl_engine_exec::coverage::CoverageSession::push_arrow_source,
+                                hnl_exec::coverage::CoverageSession::push_arrow_source,
                             );
                             let body_val = self.eval_node_inner(
                                 &def_ast,
@@ -3735,14 +3735,14 @@ impl TreeWalkEngine {
         // time) and mark hits as arrow-body (declaration *call*) hits.
         // Unmapped `body_def`s (JSON-round-tripped arrows, coverage
         // installed after mint) simply record under the ambient frame.
-        let cov_source = hnl_engine_exec::coverage::CoverageSession::source_for_body(Rc::as_ptr(
+        let cov_source = hnl_exec::coverage::CoverageSession::source_for_body(Rc::as_ptr(
             body_def,
         )
             as usize);
         let cov_guard =
-            cov_source.and_then(hnl_engine_exec::coverage::CoverageSession::push_arrow_source);
+            cov_source.and_then(hnl_exec::coverage::CoverageSession::push_arrow_source);
         if let Some(id) = cov_source {
-            hnl_engine_exec::coverage::record_arrow_application(id);
+            hnl_exec::coverage::record_arrow_application(id);
         }
         let result = self.eval_node_inner(&def_ast, body_ref, lang, &mut arrow_env);
         drop(cov_guard);
@@ -3798,7 +3798,7 @@ impl TreeWalkEngine {
         // Coverage (opt-in): record this node's span hit against the
         // innermost active coverage source. No-op when no session is
         // installed.
-        hnl_engine_exec::coverage::record_node_span(node.span.map(|s| (s.start, s.end)));
+        hnl_exec::coverage::record_node_span(node.span.map(|s| (s.start, s.end)));
         let scheme_def = lang.eval.get_by_identity(&node.kind);
         match scheme_def {
             Some(def) => self.eval_scheme_tagged(&def.scheme, ast, node_ref, lang, env, node, None),
@@ -4690,7 +4690,7 @@ impl ValueCallable for TreeWalkCallable {
 /// The tree-walk engine's [`NativeOpCtx`] — the engine-local globals the
 /// shared op table needs: the `ScopeStack`, AST-node evaluation, and
 /// arrow application. The op *semantics* live in
-/// `hnl-engine-exec::native_ops`; this struct only forwards services.
+/// `hnl-exec::native_ops`; this struct only forwards services.
 struct TwCtx<'e, 'a> {
     engine: &'e TreeWalkEngine,
     ast: &'a Ast,
@@ -5144,8 +5144,8 @@ mod tests {
     use handl_language::{AstNode, AstShapeDef, ChildRoleSpec, EvalSchemeDef, Language, Term};
     use handl_platform::{EvalContext, Function, Module, ModuleLookup};
     use handl_plugin_module::ModuleRegistry;
-    use hnl_engine_exec::EvalRequest;
-    use hnl_engine_exec::native_ops::Num;
+    use hnl_exec::EvalRequest;
+    use hnl_exec::native_ops::Num;
     use serde_json::json;
 
     // --- v2 scheme constructor helpers ---

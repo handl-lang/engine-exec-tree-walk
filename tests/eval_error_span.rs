@@ -9,8 +9,8 @@
 
 use handl_language::{Ast, AstNode, EvalSchemeDef, LangError, Span, Term, Value};
 use hnl_engine::{ArrSource, TermData};
-use hnl_engine_exec::{EvalEngine, EvalRequest};
-use hnl_engine_exec_tree_walk::TreeWalkEngine;
+use hnl_exec::{EvalEngine, EvalRequest};
+use hnl_exec_tree_walk::TreeWalkEngine;
 
 /// Convert `TermData` back to `Term` for APIs that require `Term`.
 fn td(t: TermData) -> Term {

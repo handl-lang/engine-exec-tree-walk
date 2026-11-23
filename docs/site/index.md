@@ -1,4 +1,4 @@
-# engine-exec-tree-walk
+# exec-tree-walk
 
 The reference interpreter for the eval operation.
 
@@ -11,9 +11,9 @@ conformance-tested against (ADR-0044 §3, §4; ADR-0052).
 
 ## Start here
 
-- **Reference** — [public API](/engine-exec-tree-walk/reference/)
-- **How-to** — [task recipes](/engine-exec-tree-walk/how-to/)
-- **Explanation** — [design and rationale](/engine-exec-tree-walk/explanation/)
+- **Reference** — [public API](/exec-tree-walk/reference/)
+- **How-to** — [task recipes](/exec-tree-walk/how-to/)
+- **Explanation** — [design and rationale](/exec-tree-walk/explanation/)
 
 No tutorials: this repo is a building block used from Rust. End-to-end
 walkthroughs live with the product that composes it — see the

@@ -4,11 +4,11 @@
 //! The `sort` and `grade` are encoded in the value shape (`__tag__: Number`,
 //! `grades: ["Addable"]`); the `op` and `handler` are registered on the
 //! canonical `Language` via `lang.ops` and `lang.handlers_by_grade` and driven
-//! through `hnl_engine_exec_tree_walk::ValueModel`.
+//! through `hnl_exec_tree_walk::ValueModel`.
 
 use handl_language::{ArrSource, Ast, Language, Term, Value};
 use hnl_engine::{Model, ModelCtx, TermData};
-use hnl_engine_exec_tree_walk::{TreeWalkEngine, ValueModel};
+use hnl_exec_tree_walk::{TreeWalkEngine, ValueModel};
 use serde_json::json;
 
 /// Convert `TermData` back to `Term` for engine APIs that require `Term`.

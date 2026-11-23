@@ -1,6 +1,6 @@
-# engine-exec-tree-walk
+# exec-tree-walk
 
-`hnl-engine-exec-tree-walk` — the reference interpreter for the eval operation.
+`hnl-exec-tree-walk` — the reference interpreter for the eval operation.
 
 An `engine-*` crate: interprets the arrow-calculus `Term` kernel directly by
 tree-walking, reading `lang.eval[node.kind]` and evaluating the resulting
@@ -23,4 +23,4 @@ MIT.
 
 ## Documentation
 
-<https://handl-lang.github.io/docs/engine-exec-tree-walk/>
+<https://handl-lang.github.io/docs/exec-tree-walk/>

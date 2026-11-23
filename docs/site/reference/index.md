@@ -5,14 +5,14 @@
 | item | what it is |
 |---|---|
 | value shapes | tagged JSON pair `__pair__` and friends — the values combinators operate on |
-| `EvalEngine` impl | the `engine-exec` contract |
+| `EvalEngine` impl | the `exec` contract |
 | handler support | resumable `handle`/`perform` via the shared journal keys (ADR-0158) |
 
 ## Crate
 
 | crate | role |
 |---|---|
-| `hnl-engine-exec-tree-walk` | engine implementation |
+| `hnl-exec-tree-walk` | engine implementation |
 
 ## Build and test
 

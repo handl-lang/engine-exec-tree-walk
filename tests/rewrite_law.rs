@@ -6,7 +6,7 @@
 
 use handl_language::{ArrSource, Ast, Language, Term, Value};
 use hnl_engine::{Model, ModelCtx, RewriteResult, RewriteWitness, TermData};
-use hnl_engine_exec_tree_walk::{TreeWalkEngine, ValueModel};
+use hnl_exec_tree_walk::{TreeWalkEngine, ValueModel};
 use serde_json::json;
 
 fn t(td: TermData) -> Term {

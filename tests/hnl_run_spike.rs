@@ -11,8 +11,8 @@ use std::rc::Rc;
 use handl_language::{Ast, AstNode, EvalSchemeDef, Language, Term, Value};
 use handl_platform::{EvalContext, EvalError, Function, Module, ModuleLookup};
 use handl_plugin_module::ModuleRegistry;
-use hnl_engine_exec::{EvalEngine, EvalRequest};
-use hnl_engine_exec_tree_walk::TreeWalkEngine;
+use hnl_exec::{EvalEngine, EvalRequest};
+use hnl_exec_tree_walk::TreeWalkEngine;
 use serde_json::json;
 
 /// A pipeline stage: a host function that transforms the threaded value.
