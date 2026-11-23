@@ -2,7 +2,7 @@
 
 `hnl-exec-tree-walk` — the reference interpreter for the eval operation.
 
-An `engine-*` crate: interprets the arrow-calculus `Term` kernel directly by
+An `exec-*` crate: interprets the arrow-calculus `Term` kernel directly by
 tree-walking, reading `lang.eval[node.kind]` and evaluating the resulting
 scheme with the shared native-op table. It is the reference implementation
 the other eval engines are checked against.
