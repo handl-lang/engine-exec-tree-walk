@@ -2268,7 +2268,13 @@ impl TreeWalkEngine {
                 })?;
                 // Convert TaggedValue args to Value for the host function
                 // boundary (host functions still use serde_json::Value).
-                let value_args: Vec<Value> = arg_vals.iter().map(tagged_to_value).collect();
+                // T-153: a leading `null` filling a `type.unit` signature
+                // domain is elided — `f(null)` ≡ `f()`.
+                let value_args: Vec<Value> = handl_platform::elide_unit_args(
+                    &**modules,
+                    name,
+                    arg_vals.iter().map(tagged_to_value).collect(),
+                );
                 let mut pctx = handl_platform::EvalContext::new();
                 pctx.set_value_callable(Rc::new(TreeWalkCallable));
                 let val = func
@@ -3009,11 +3015,14 @@ impl TreeWalkEngine {
                         current_node,
                     )
                 })?;
-                let call_args: Vec<Value> = args
-                    .first()
-                    .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().map(tagged_to_value).collect())
-                    .unwrap_or_default();
+                let call_args: Vec<Value> = handl_platform::elide_unit_args(
+                    &**modules,
+                    callee,
+                    args.first()
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().map(tagged_to_value).collect())
+                        .unwrap_or_default(),
+                );
                 let mut pctx = handl_platform::EvalContext::new();
                 pctx.set_value_callable(Rc::new(TreeWalkCallable));
                 let val = func
@@ -3355,7 +3364,13 @@ impl TreeWalkEngine {
                 current_node,
             )
         })?;
-        let call_args: Vec<Value> = args.iter().map(tagged_to_value).collect();
+        // T-153: elide a leading `null` that fills a `type.unit` domain —
+        // `f(null)` ≡ `f()` at the host boundary.
+        let call_args: Vec<Value> = handl_platform::elide_unit_args(
+            &**modules,
+            name,
+            args.iter().map(tagged_to_value).collect(),
+        );
         let mut pctx = handl_platform::EvalContext::new();
         pctx.set_value_callable(Rc::new(TreeWalkCallable));
         let val = func
@@ -3824,6 +3839,10 @@ impl TreeWalkEngine {
                             }
                         }
                     }
+                    // T-153: elide a leading `null` filling a `type.unit`
+                    // domain — `f(null)` ≡ `f()`.
+                    let arg_vals: Vec<Value> =
+                        handl_platform::elide_unit_args(&**modules, foreign_name, arg_vals);
                     let mut pctx = handl_platform::EvalContext::new();
                     pctx.set_value_callable(Rc::new(TreeWalkCallable));
                     let val = func
