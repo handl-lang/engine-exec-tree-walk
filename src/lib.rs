@@ -3510,6 +3510,7 @@ impl TreeWalkEngine {
                 body_def,
                 binds,
                 handlers,
+                sig: _,
             } => (
                 params.clone(),
                 rest.clone(),
@@ -5022,6 +5023,7 @@ fn attach_carried_handler(val: TaggedValue, handler: &TaggedValue) -> TaggedValu
             body_def,
             binds,
             handlers,
+            sig,
         } => {
             // ADR-0076 carried handlers are explicit data on the arrow —
             // no `__handlers__` env smuggling.
@@ -5034,6 +5036,7 @@ fn attach_carried_handler(val: TaggedValue, handler: &TaggedValue) -> TaggedValu
                 body_def,
                 binds,
                 handlers: Rc::from(hs),
+                sig,
             }
         }
         other => other,
