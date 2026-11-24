@@ -84,10 +84,7 @@ fn stage(name: &str) -> Term {
 #[test]
 fn seq_pipeline_of_foreign_stage_ops_round_trips() {
     // `lift >>> search >>> verify` — left-nested Seq, axis 0.
-    let pipe = Term::seq(
-        Term::seq(stage("lift"), stage("search")),
-        stage("verify"),
-    );
+    let pipe = Term::seq(Term::seq(stage("lift"), stage("search")), stage("verify"));
 
     let mut lang = Language::new();
     lang.eval
@@ -97,12 +94,10 @@ fn seq_pipeline_of_foreign_stage_ops_round_trips() {
     // The "script": one AST node whose kind's eval scheme IS the pipeline.
     let mut ast = Ast::new();
     ast.push(
-        AstNode::new("pipeline")
-            .with_payload(json!({"script": "lift >>> search >>> verify"})),
+        AstNode::new("pipeline").with_payload(json!({"script": "lift >>> search >>> verify"})),
     );
 
-    let registry: Rc<dyn ModuleLookup> =
-        Rc::new(ModuleRegistry::new().with(PipelineModule));
+    let registry: Rc<dyn ModuleLookup> = Rc::new(ModuleRegistry::new().with(PipelineModule));
     let engine = TreeWalkEngine::new().with_modules(registry);
 
     let result = engine
@@ -126,8 +121,7 @@ fn seq_pipeline_failure_propagates() {
     let mut ast = Ast::new();
     ast.push(AstNode::new("pipeline"));
 
-    let registry: Rc<dyn ModuleLookup> =
-        Rc::new(ModuleRegistry::new().with(PipelineModule));
+    let registry: Rc<dyn ModuleLookup> = Rc::new(ModuleRegistry::new().with(PipelineModule));
     let engine = TreeWalkEngine::new().with_modules(registry);
     let err = engine.eval(&lang, &EvalRequest::new(ast)).unwrap_err();
     assert!(

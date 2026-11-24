@@ -3087,13 +3087,11 @@ impl TreeWalkEngine {
                             let mut closure_env = ScopeStack::new();
                             closure_env.captured = Some(binds);
                             closure_env.globals = Rc::clone(&env.globals);
-                            let cov_source =
-                                hnl_exec::coverage::CoverageSession::source_for_body(
-                                    Rc::as_ptr(&body_def) as usize,
-                                );
-                            let cov_guard = cov_source.and_then(
-                                hnl_exec::coverage::CoverageSession::push_arrow_source,
+                            let cov_source = hnl_exec::coverage::CoverageSession::source_for_body(
+                                Rc::as_ptr(&body_def) as usize,
                             );
+                            let cov_guard = cov_source
+                                .and_then(hnl_exec::coverage::CoverageSession::push_arrow_source);
                             let body_val = self.eval_node_inner(
                                 &def_ast,
                                 AstRef::new(def_ast.len() - 1),
@@ -3736,12 +3734,9 @@ impl TreeWalkEngine {
         // time) and mark hits as arrow-body (declaration *call*) hits.
         // Unmapped `body_def`s (JSON-round-tripped arrows, coverage
         // installed after mint) simply record under the ambient frame.
-        let cov_source = hnl_exec::coverage::CoverageSession::source_for_body(Rc::as_ptr(
-            body_def,
-        )
-            as usize);
-        let cov_guard =
-            cov_source.and_then(hnl_exec::coverage::CoverageSession::push_arrow_source);
+        let cov_source =
+            hnl_exec::coverage::CoverageSession::source_for_body(Rc::as_ptr(body_def) as usize);
+        let cov_guard = cov_source.and_then(hnl_exec::coverage::CoverageSession::push_arrow_source);
         if let Some(id) = cov_source {
             hnl_exec::coverage::record_arrow_application(id);
         }
