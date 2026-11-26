@@ -3170,10 +3170,9 @@ impl TreeWalkEngine {
                     };
                     TaggedValue::from(value)
                 };
-                if let (Some(target_idx), Some(value_idx)) = (
-                    role_child_arena(lang, expr_node, "target"),
-                    role_child_arena(lang, expr_node, "value"),
-                ) {
+                if let Some((target_idx, value_idx)) =
+                    assert_operand_children(lang, expr_node)
+                {
                     let target_val =
                         self.eval_node_inner(ast, AstRef::new(target_idx), lang, env)?;
                     let value_val = self.eval_node_inner(ast, AstRef::new(value_idx), lang, env)?;
@@ -5308,6 +5307,44 @@ fn either_right_val(v: &TaggedValue) -> Option<TaggedValue> {
 /// keep their positional fallback.
 fn role_index_of(lang: &Language, node_kind: &str, role: &str) -> Option<usize> {
     lang.child_role_index(node_kind, role).ok().flatten()
+}
+
+/// The `(actual-side, expected-side)` child arena indices when `node` is
+/// an equality-shaped expression the `assert` op can split into
+/// expected/actual failure detail.
+///
+/// Two layouts qualify:
+///
+/// - `target`/`value` roles — the `assign`-family shape (the legacy
+///   `=`/`::` bind-as-equality form);
+/// - `left`/`right` roles on a node whose eval scheme is the `eq` op —
+///   the canonical `binary.eq` (`==`/`=`) comparison since `:=` became
+///   the only binding operator.
+///
+/// Returns `(actual, expected)` positions: for `a == b` the left operand
+/// is the actual and the right operand the expected, mirroring the
+/// `target`/`value` convention. Other two-sided nodes (`<`, `+`, …) are
+/// NOT equality-shaped and return `None` — their expr is a truthy test.
+fn assert_operand_children(lang: &Language, node: &AstNode) -> Option<(usize, usize)> {
+    if let (Some(target), Some(value)) = (
+        role_child_arena(lang, node, "target"),
+        role_child_arena(lang, node, "value"),
+    ) {
+        return Some((target, value));
+    }
+    let is_eq = lang
+        .eval
+        .get_by_identity(&node.kind)
+        .is_some_and(|def| matches!(&def.scheme, Term::Op { name, .. } if name == "eq"));
+    if is_eq {
+        if let (Some(left), Some(right)) = (
+            role_child_arena(lang, node, "left"),
+            role_child_arena(lang, node, "right"),
+        ) {
+            return Some((left, right));
+        }
+    }
+    None
 }
 
 /// Project the child arena index at `role` from `node`'s payload children.
