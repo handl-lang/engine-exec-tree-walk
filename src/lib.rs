@@ -7543,16 +7543,19 @@ mod tests {
         // `([x, y]) ~> x + y` applied to `[1, 2]` → 3. The params node is a
         // `paren` wrapping one `array` (sequence) pattern; `param_defs`
         // carries the params subtree and `try_pattern` binds `x`, `y` from
-        // the packed argument array — lib-datetime's `([s, fmt]) ~>` style.
-        // A single array argument stands in for the `proj_rest`-packed
-        // argument list `f(1, 2)` produces at real call sites.
+        // the single array argument. `([x, y]) ~>` is a params *list* with
+        // one pattern param — the pattern consumes one call argument, so
+        // the `proj_rest`-packed argument list `[[1, 2]]` must unpack back
+        // to `[1, 2]` at the call site (`array_pattern` stays `false`;
+        // only a bare `[x, y] ~>` params node keeps the packed list whole).
         // 0: var("x"), 1: var("y")
         // 2: array{children:[0,1]}   — the [x, y] pattern
         // 3: paren{children:[2]}     — the params node
         // 4: var("x"), 5: var("y"), 6: binary.add{children:[4,5]} — body
         // 7: function{children:[3,6]}
         // 8: value(1), 9: value(2), 10: array{children:[8,9]} — arg [1,2]
-        // 11: call{children:[7,10]}
+        // 11: array{children:[10]}   — proj_rest-packed arg list [[1,2]]
+        // 12: call{children:[7,11]}
         let engine = TreeWalkEngine::new();
         let lang = pattern_params_lang();
         let ast = make_ast(vec![
@@ -7567,7 +7570,8 @@ mod tests {
             AstNode::new("value").with_payload(json!(1)), // 8
             AstNode::new("value").with_payload(json!(2)), // 9
             AstNode::new("array").with_payload(json!({"children": [8, 9]})), // 10
-            AstNode::new("call").with_payload(json!({"children": [7, 10]})), // 11
+            AstNode::new("array").with_payload(json!({"children": [10]})), // 11
+            AstNode::new("call").with_payload(json!({"children": [7, 11]})), // 12
         ]);
         let req = EvalRequest::new(ast);
         assert_eq!(engine.eval(&lang, &req).unwrap(), json!(3));
@@ -7596,6 +7600,75 @@ mod tests {
         assert_eq!(result["__arrow__"], json!(true));
         assert_eq!(result["params"], json!(["x", "y"]));
         assert!(result["param_defs"]["__ast__"].is_object());
+    }
+
+    /// `([x, y]) ~>` applied to a spread call `f(1, 2)` must fail: the
+    /// single sequence-pattern param expects one array argument, not
+    /// the packed argument list. Before the `param_single_sequence`
+    /// fix the `array_pattern` flag kept `[1, 2]` whole and the pattern
+    /// wrongly matched it (myco I-010).
+    #[test]
+    fn closure_paren_sequence_param_rejects_spread_args() {
+        // Same arrow and body as above; the packed arg list is `[1, 2]`
+        // itself (two scalar call args) — node 10 is array{[8,9]}.
+        // 11: call{[7,10]}
+        let engine = TreeWalkEngine::new();
+        let lang = pattern_params_lang();
+        let ast = make_ast(vec![
+            AstNode::new("var").with_payload(json!("x")), // 0
+            AstNode::new("var").with_payload(json!("y")), // 1
+            AstNode::new("array").with_payload(json!({"children": [0, 1]})), // 2
+            AstNode::new("paren").with_payload(json!({"children": [2]})), // 3
+            AstNode::new("var").with_payload(json!("x")), // 4
+            AstNode::new("var").with_payload(json!("y")), // 5
+            AstNode::new("binary.add").with_payload(json!({"children": [4, 5]})), // 6
+            AstNode::new("function").with_payload(json!({"children": [3, 6]})), // 7
+            AstNode::new("value").with_payload(json!(1)), // 8
+            AstNode::new("value").with_payload(json!(2)), // 9
+            AstNode::new("array").with_payload(json!({"children": [8, 9]})), // 10
+            AstNode::new("call").with_payload(json!({"children": [7, 10]})), // 11
+        ]);
+        let req = EvalRequest::new(ast);
+        assert!(engine.eval(&lang, &req).is_err());
+    }
+
+    /// A *bare* sequence params node (`[x, [y, z]] ~>`) still consumes
+    /// the packed argument list whole — `param_single_sequence` stays
+    /// true there, so `k(1, [2, 3])` destructures `[1, [2, 3]]`.
+    #[test]
+    fn closure_bare_sequence_params_still_packs_arg_list() {
+        // 0: var("x"), 1: var("y"), 2: var("z")
+        // 3: array{[1,2]}  — inner [y, z] pattern
+        // 4: array{[0,3]}  — params node [x, [y, z]]
+        // 5: var("x"), 6: var("y"), 7: add{[5,6]}, 8: var("z"), 9: add{[7,8]} — body x+y+z
+        // 10: function{[4,9]}
+        // 11: value(1), 12: value(2), 13: value(3)
+        // 14: array{[12,13]} — [2,3]
+        // 15: array{[11,14]} — packed arg list [1, [2,3]]
+        // 16: call{[10,15]}
+        let engine = TreeWalkEngine::new();
+        let lang = pattern_params_lang();
+        let ast = make_ast(vec![
+            AstNode::new("var").with_payload(json!("x")), // 0
+            AstNode::new("var").with_payload(json!("y")), // 1
+            AstNode::new("var").with_payload(json!("z")), // 2
+            AstNode::new("array").with_payload(json!({"children": [1, 2]})), // 3
+            AstNode::new("array").with_payload(json!({"children": [0, 3]})), // 4
+            AstNode::new("var").with_payload(json!("x")), // 5
+            AstNode::new("var").with_payload(json!("y")), // 6
+            AstNode::new("binary.add").with_payload(json!({"children": [5, 6]})), // 7
+            AstNode::new("var").with_payload(json!("z")), // 8
+            AstNode::new("binary.add").with_payload(json!({"children": [7, 8]})), // 9
+            AstNode::new("function").with_payload(json!({"children": [4, 9]})), // 10
+            AstNode::new("value").with_payload(json!(1)), // 11
+            AstNode::new("value").with_payload(json!(2)), // 12
+            AstNode::new("value").with_payload(json!(3)), // 13
+            AstNode::new("array").with_payload(json!({"children": [12, 13]})), // 14
+            AstNode::new("array").with_payload(json!({"children": [11, 14]})), // 15
+            AstNode::new("call").with_payload(json!({"children": [10, 15]})), // 16
+        ]);
+        let req = EvalRequest::new(ast);
+        assert_eq!(engine.eval(&lang, &req).unwrap(), json!(6));
     }
 
     // -----------------------------------------------------------------
