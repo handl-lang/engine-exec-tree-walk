@@ -114,7 +114,8 @@ use handl_value::{
 use hnl_engine::{Model, ModelCtx, RewriteResult, TermData, is_hott_tag};
 pub use hnl_exec::EvalFrame;
 use hnl_exec::native_ops::{
-    self, NativeOpCtx, OpService, build_loop_step_args, is_truthy, loop_step_outcome, step_decision,
+    self, ClosureParams, NativeOpCtx, OpService, build_loop_step_args, is_truthy, loop_step_outcome,
+    step_decision,
 };
 use hnl_exec::pattern_match::{self, PatternMatchCtx};
 use hnl_exec::services::{
@@ -3515,30 +3516,42 @@ impl TreeWalkEngine {
         // arrow is self-contained data (ADR-0106): `body_def` is the
         // substituted standalone arena, `binds` the explicit residual
         // bindings, `handlers` the carried deep handlers.
-        let (params, rest_param, array_pattern, body_def, binds, handlers) = match callee {
-            TaggedValue::Arrow {
-                params,
-                rest,
-                array_pattern,
-                body_def,
-                binds,
-                handlers,
-                sig: _,
-            } => (
-                params.clone(),
-                rest.clone(),
-                *array_pattern,
-                body_def.clone(),
-                binds.clone(),
-                handlers.clone(),
-            ),
-            _ => {
-                return Err(LangError::engine_node(
-                    "callee is not an arrow-value".to_string(),
-                    current_node,
-                ));
-            }
-        };
+        let (params, rest_param, array_pattern, param_defs, body_def, binds, handlers) =
+            match callee {
+                TaggedValue::Arrow {
+                    params,
+                    rest,
+                    array_pattern,
+                    param_defs,
+                    body_def,
+                    binds,
+                    handlers,
+                    sig: _,
+                } => (
+                    params.clone(),
+                    rest.clone(),
+                    *array_pattern,
+                    param_defs.clone(),
+                    body_def.clone(),
+                    binds.clone(),
+                    handlers.clone(),
+                ),
+                _ => {
+                    return Err(LangError::engine_node(
+                        "callee is not an arrow-value".to_string(),
+                        current_node,
+                    ));
+                }
+            };
+        // Destructured-param arrows (`([x, y]) ~> body`, `({a, b}) ~> body`)
+        // carry the params AST in `param_defs`; each top-level pattern is
+        // matched against its argument via `try_pattern` (ADR-0081).
+        if let Some(pd) = &param_defs {
+            return self.apply_arrow_patterns(
+                pd, args, ast, lang, env, node_ref, current_node, &body_def, &binds, &handlers,
+                callee,
+            );
+        }
         // Array-pattern arrows (`[x, y] ~> body`) consume a single array
         // argument and destructure it by position. The array itself is the
         // sole argument; fixed names bind to leading elements and a rest
@@ -3569,14 +3582,14 @@ impl TreeWalkEngine {
                 )));
             }
             let (head, tail) = arr.split_at(fixed);
-            return self.apply_arrow_body(
+            return self.apply_arrow_body_positional(
                 &params,
                 rest_param.as_ref(),
+                head,
+                tail,
                 &body_def,
                 &binds,
                 &handlers,
-                head,
-                tail,
                 lang,
                 Some(Rc::clone(&env.globals)),
                 callee,
@@ -3610,14 +3623,14 @@ impl TreeWalkEngine {
         // instead of currying, and the call consumes all args at once.
         if let Some(rest_name) = &rest_param {
             let (head, tail) = actual_args.split_at(params.len());
-            return self.apply_arrow_body(
+            return self.apply_arrow_body_positional(
                 &params,
                 Some(rest_name),
+                head,
+                tail,
                 &body_def,
                 &binds,
                 &handlers,
-                head,
-                tail,
                 lang,
                 Some(Rc::clone(&env.globals)),
                 callee,
@@ -3625,14 +3638,14 @@ impl TreeWalkEngine {
             );
         }
         let (head, mut rest) = actual_args.split_at(params.len());
-        let mut val = self.apply_arrow_body(
+        let mut val = self.apply_arrow_body_positional(
             &params,
             None,
+            head,
+            &[],
             &body_def,
             &binds,
             &handlers,
-            head,
-            &[],
             lang,
             Some(Rc::clone(&env.globals)),
             callee,
@@ -3687,27 +3700,60 @@ impl TreeWalkEngine {
         )
     }
 
-    /// Apply an arrow body: evaluate the arrow's `body_def` arena under a
-    /// fresh env containing only the arrow's explicit residual `binds`
-    /// plus the call-time params (ADR-0106 — there is no captured lexical
-    /// environment). The caller's env is never mutated.
-    ///
-    /// `globals` are the host globals the body should fall back to (the
-    /// ambient env's globals; `None` → none). `lookup()` checks the local
-    /// param scope first, then the residual binds, then globals.
+    /// Bind `params`/`rest_param` to `actual_args`/`rest_args` and apply
+    /// the arrow body — the shared tail of the positional, rest, and
+    /// array-pattern application paths.
     ///
     /// The body root is the last node of the `body_def` arena
     /// (post-order extraction, [`Ast::instantiate`]).
     #[allow(clippy::too_many_arguments)]
-    fn apply_arrow_body(
+    fn apply_arrow_body_positional(
         &self,
         params: &[String],
         rest_param: Option<&Rc<str>>,
+        actual_args: &[TaggedValue],
+        rest_args: &[TaggedValue],
         body_def: &Rc<TaggedValue>,
         binds: &Rc<FxHashMap<Rc<str>, TaggedValue>>,
         handlers: &[TaggedValue],
-        actual_args: &[TaggedValue],
-        rest_args: &[TaggedValue],
+        lang: &Language,
+        globals: Option<Rc<FxHashMap<Rc<str>, TaggedValue>>>,
+        self_val: &TaggedValue,
+        current_node: &AstNode,
+    ) -> Result<TaggedValue, LangError> {
+        let mut bindings: Vec<(Rc<str>, TaggedValue)> = Vec::with_capacity(params.len() + 1);
+        for (param, arg) in params.iter().zip(actual_args.iter()) {
+            bindings.push((Rc::from(param.as_str()), arg.clone()));
+        }
+        // Rest param: bind the surplus args as an array (possibly empty).
+        if let Some(name) = rest_param {
+            bindings.push((
+                Rc::clone(name),
+                TaggedValue::Arr(Rc::from(rest_args.to_vec())),
+            ));
+        }
+        self.apply_arrow_body(
+            &bindings,
+            body_def,
+            binds,
+            handlers,
+            lang,
+            globals,
+            self_val,
+            current_node,
+        )
+    }
+
+    /// Apply an arrow body (ADR-0106) with `bindings` — the name→value
+    /// pairs the call established (positional params, rest array, or
+    /// destructured-pattern matches) — bound into a fresh scope over the
+    /// arrow's residual `binds`.
+    fn apply_arrow_body(
+        &self,
+        bindings: &[(Rc<str>, TaggedValue)],
+        body_def: &Rc<TaggedValue>,
+        binds: &Rc<FxHashMap<Rc<str>, TaggedValue>>,
+        handlers: &[TaggedValue],
         lang: &Language,
         globals: Option<Rc<FxHashMap<Rc<str>, TaggedValue>>>,
         self_val: &TaggedValue,
@@ -3732,15 +3778,8 @@ impl TreeWalkEngine {
                 arrow_env.define(name, self_val.clone());
             }
         }
-        for (param, arg) in params.iter().zip(actual_args.iter()) {
-            arrow_env.define(param, arg.clone());
-        }
-        // Rest param: bind the surplus args as an array (possibly empty).
-        if let Some(name) = rest_param {
-            arrow_env.define(
-                name.as_ref(),
-                TaggedValue::Arr(Rc::from(rest_args.to_vec())),
-            );
+        for (name, val) in bindings.iter() {
+            arrow_env.define(name, val.clone());
         }
         let _guard = HandlerStackGuard::push(&self.handler_stack, handlers.iter().cloned());
 
@@ -3758,6 +3797,150 @@ impl TreeWalkEngine {
         let result = self.eval_node_inner(&def_ast, body_ref, lang, &mut arrow_env);
         drop(cov_guard);
         result
+    }
+
+    /// Apply an arrow whose params carry destructuring patterns
+    /// (`param_defs` — `([x, y]) ~>`, `({a, b}) ~>`, `[x, [y, z]] ~>`).
+    ///
+    /// The `param_defs` arena's root is the params node. A `sequence` or
+    /// `entries` root is a *single* pattern consuming one argument whole
+    /// (the `array_pattern` packing flag already keeps the array intact
+    /// at call sites); anything else is a params list whose top-level
+    /// children are positional patterns — a trailing `rest` pattern binds
+    /// the surplus args as an array, and surplus args past the fixed
+    /// patterns curry exactly like the positional path. Every pattern is
+    /// matched via [`pattern_match::try_pattern`]; bindings land in a
+    /// fresh scope through [`apply_arrow_body`].
+    ///
+    /// `param_defs` is a `{"__ast__": …}` value (the params-node subtree)
+    /// serialized at `closure`-mint time — the same self-describing
+    /// encoding `body_def` uses.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_arrow_patterns(
+        &self,
+        param_defs: &Rc<TaggedValue>,
+        args: &[TaggedValue],
+        ast: &Ast,
+        lang: &Language,
+        env: &mut ScopeStack,
+        node_ref: AstRef,
+        current_node: &AstNode,
+        body_def: &Rc<TaggedValue>,
+        binds: &Rc<FxHashMap<Rc<str>, TaggedValue>>,
+        handlers: &[TaggedValue],
+        callee: &TaggedValue,
+    ) -> Result<TaggedValue, LangError> {
+        let pat_ast = cached_def_arena(param_defs).ok_or_else(|| {
+            LangError::engine_node("arrow: malformed param_defs".to_string(), current_node)
+        })?;
+        let params_ref = AstRef::new(pat_ast.len() - 1);
+        let tops = lang.top_level_param_refs(&pat_ast, params_ref)?;
+        let root = pat_ast.at(params_ref)?;
+        let root_is_pattern = matches!(
+            lang.pattern_role(&root.kind),
+            Some("sequence") | Some("entries")
+        );
+        let mut bindings: Vec<(Rc<str>, TaggedValue)> = Vec::new();
+        let mut curry: &[TaggedValue] = &[];
+        if root_is_pattern {
+            // Single pattern (`[x, y] ~>`, `{a, b} ~>`): one scrutinee,
+            // surplus args curry.
+            let Some(scrut) = args.first() else {
+                return Err(LangError::engine(
+                    "destructured-param arrow expects at least 1 argument".to_string(),
+                ));
+            };
+            curry = &args[1..];
+            let mut pctx = ParamBindCtx::new(self, lang, binds, env);
+            let matched = pattern_match::try_pattern(&pat_ast, params_ref, scrut, &mut pctx)?;
+            if !matched {
+                return Err(LangError::engine_node(
+                    "closure: destructured param match failed".to_string(),
+                    current_node,
+                ));
+            }
+            bindings = pctx.out;
+        } else {
+            // Params list: top-level children are positional patterns; a
+            // `rest` pattern (at most one, last) binds the surplus tail.
+            let mut fixed: Vec<AstRef> = Vec::with_capacity(tops.len());
+            let mut rest_ref: Option<AstRef> = None;
+            for t in &tops {
+                let n = pat_ast.at(*t)?;
+                if lang.pattern_role_is(&n.kind, "rest") == Some(true) {
+                    if rest_ref.is_some() {
+                        return Err(LangError::engine(
+                            "closure: multiple rest params".to_string(),
+                        ));
+                    }
+                    rest_ref = Some(*t);
+                } else {
+                    fixed.push(*t);
+                }
+            }
+            if args.len() < fixed.len() {
+                return Err(LangError::engine(format!(
+                    "closure: destructured arrow expects at least {} arg(s), got {}",
+                    fixed.len(),
+                    args.len()
+                )));
+            }
+            for (i, pat_ref) in fixed.iter().enumerate() {
+                let pat_ref = unwrap_pattern_wrapper(lang, &pat_ast, *pat_ref)?;
+                let mut pctx = ParamBindCtx::new(self, lang, binds, env);
+                let matched =
+                    pattern_match::try_pattern(&pat_ast, pat_ref, &args[i], &mut pctx)?;
+                if !matched {
+                    return Err(LangError::engine_node(
+                        format!("closure: destructured param {} match failed", i + 1),
+                        current_node,
+                    ));
+                }
+                bindings.extend(pctx.out);
+            }
+            let split = fixed.len();
+            if let Some(rr) = rest_ref {
+                // `...rest` binds the surplus args as an array — a plain
+                // `var` subject binds the name directly; a pattern
+                // subject matches the tail array.
+                let tail = TaggedValue::Arr(Rc::from(args[split..].to_vec()));
+                let rest_node = pat_ast.at(rr)?;
+                let subject_ref = rest_subject_ref(lang, rest_node)?;
+                let subj_node = pat_ast.at(subject_ref)?;
+                if lang.pattern_role_is(&subj_node.kind, "leaf") == Some(true)
+                    && let Some(name) = subj_node.payload.as_str()
+                {
+                    if !(name.starts_with('_') && !name.starts_with("__fresh_")) {
+                        bindings.push((Rc::from(name), tail));
+                    }
+                } else {
+                    let mut pctx = ParamBindCtx::new(self, lang, binds, env);
+                    if !pattern_match::try_pattern(&pat_ast, subject_ref, &tail, &mut pctx)? {
+                        return Err(LangError::engine_node(
+                            "closure: rest-param match failed".to_string(),
+                            current_node,
+                        ));
+                    }
+                    bindings.extend(pctx.out);
+                }
+            } else if args.len() > split {
+                curry = &args[split..];
+            }
+        }
+        let mut val = self.apply_arrow_body(
+            &bindings,
+            body_def,
+            binds,
+            handlers,
+            lang,
+            Some(Rc::clone(&env.globals)),
+            callee,
+            current_node,
+        )?;
+        if !curry.is_empty() {
+            val = self.apply_app(&val, curry, ast, lang, env, node_ref, current_node)?;
+        }
+        Ok(val)
     }
 
     /// Evaluate a single node by looking up its eval scheme and
@@ -4840,13 +5023,8 @@ impl NativeOpCtx for TwCtx<'_, '_> {
         self.lang.literal_child(&parent_kind, role, &child_kind)
     }
 
-    fn closure_params_at(
-        &mut self,
-        r: AstRef,
-    ) -> Result<(Vec<String>, Option<String>, bool), LangError> {
-        let node = self.ast.at(r)?;
-        let (names, rest) = self.lang.param_names(self.ast, node)?;
-        Ok((names, rest, self.lang.is_array_pattern(node)))
+    fn closure_params_at(&mut self, r: AstRef) -> Result<ClosureParams, LangError> {
+        native_ops::resolve_closure_params(self.lang, self.ast, r)
     }
 
     fn closure_body_def(
@@ -5034,6 +5212,7 @@ fn attach_carried_handler(val: TaggedValue, handler: &TaggedValue) -> TaggedValu
             params,
             rest,
             array_pattern,
+            param_defs,
             body_def,
             binds,
             handlers,
@@ -5047,6 +5226,7 @@ fn attach_carried_handler(val: TaggedValue, handler: &TaggedValue) -> TaggedValu
                 params,
                 rest,
                 array_pattern,
+                param_defs,
                 body_def,
                 binds,
                 handlers: Rc::from(hs),
@@ -7274,6 +7454,113 @@ mod tests {
         assert_eq!(result["params"], json!(["x", "y"]));
     }
 
+    /// Minimal language for destructured-param closure tests: `var` is a
+    /// `leaf` pattern, `array` a `sequence` pattern, `paren` a variadic
+    /// params list, `function` declares `params`/`body` roles.
+    ///
+    /// Ast shapes merge with union/first-wins semantics, so the
+    /// `pattern_role` declarations must land *before* `literal_eval_lang`'s
+    /// role-less `array`/`paren` shapes — merging the other way drops them.
+    fn pattern_params_lang() -> Language {
+        let mut lang = Language::new();
+        let shape = |kind: &str, roles: Vec<ChildRoleSpec>| {
+            AstShapeDef::new(format!("ast.{kind}"), kind).with_children(roles)
+        };
+        let variadic = |role: &str| ChildRoleSpec {
+            role: role.into(),
+            variadic: true,
+            optional: false,
+        };
+        lang.ast
+            .merge(shape("var", vec![]).with_pattern_role("leaf"))
+            .unwrap();
+        lang.ast
+            .merge(
+                shape("array", vec![variadic("elements")]).with_pattern_role("sequence"),
+            )
+            .unwrap();
+        lang.ast.merge(shape("paren", vec![variadic("body")])).unwrap();
+        lang.ast
+            .merge(shape(
+                "function",
+                vec![
+                    ChildRoleSpec {
+                        role: "params".into(),
+                        variadic: false,
+                        optional: false,
+                    },
+                    ChildRoleSpec {
+                        role: "body".into(),
+                        variadic: false,
+                        optional: false,
+                    },
+                ],
+            ))
+            .unwrap();
+        lang.merge(literal_eval_lang()).unwrap();
+        lang
+    }
+
+    #[test]
+    fn closure_destructured_sequence_params_eval() {
+        // `([x, y]) ~> x + y` applied to `[1, 2]` → 3. The params node is a
+        // `paren` wrapping one `array` (sequence) pattern; `param_defs`
+        // carries the params subtree and `try_pattern` binds `x`, `y` from
+        // the packed argument array — lib-datetime's `([s, fmt]) ~>` style.
+        // A single array argument stands in for the `proj_rest`-packed
+        // argument list `f(1, 2)` produces at real call sites.
+        // 0: var("x"), 1: var("y")
+        // 2: array{children:[0,1]}   — the [x, y] pattern
+        // 3: paren{children:[2]}     — the params node
+        // 4: var("x"), 5: var("y"), 6: binary.add{children:[4,5]} — body
+        // 7: function{children:[3,6]}
+        // 8: value(1), 9: value(2), 10: array{children:[8,9]} — arg [1,2]
+        // 11: call{children:[7,10]}
+        let engine = TreeWalkEngine::new();
+        let lang = pattern_params_lang();
+        let ast = make_ast(vec![
+            AstNode::new("var").with_payload(json!("x")), // 0
+            AstNode::new("var").with_payload(json!("y")), // 1
+            AstNode::new("array").with_payload(json!({"children": [0, 1]})), // 2
+            AstNode::new("paren").with_payload(json!({"children": [2]})), // 3
+            AstNode::new("var").with_payload(json!("x")), // 4
+            AstNode::new("var").with_payload(json!("y")), // 5
+            AstNode::new("binary.add").with_payload(json!({"children": [4, 5]})), // 6
+            AstNode::new("function").with_payload(json!({"children": [3, 6]})), // 7
+            AstNode::new("value").with_payload(json!(1)), // 8
+            AstNode::new("value").with_payload(json!(2)), // 9
+            AstNode::new("array").with_payload(json!({"children": [8, 9]})), // 10
+            AstNode::new("call").with_payload(json!({"children": [7, 10]})), // 11
+        ]);
+        let req = EvalRequest::new(ast);
+        assert_eq!(engine.eval(&lang, &req).unwrap(), json!(3));
+    }
+
+    #[test]
+    fn closure_destructured_params_mints_param_defs() {
+        // The minted arrow flattens pattern binders into `params` (for
+        // capture exclusion) and carries the params subtree in
+        // `param_defs`.
+        // 0: var("x"), 1: var("y")
+        // 2: array{children:[0,1]}, 3: paren{children:[2]}
+        // 4: var("x"), 5: function{children:[3,4]}
+        let engine = TreeWalkEngine::new();
+        let lang = pattern_params_lang();
+        let ast = make_ast(vec![
+            AstNode::new("var").with_payload(json!("x")), // 0
+            AstNode::new("var").with_payload(json!("y")), // 1
+            AstNode::new("array").with_payload(json!({"children": [0, 1]})), // 2
+            AstNode::new("paren").with_payload(json!({"children": [2]})), // 3
+            AstNode::new("var").with_payload(json!("x")), // 4
+            AstNode::new("function").with_payload(json!({"children": [3, 4]})), // 5
+        ]);
+        let req = EvalRequest::new(ast);
+        let result = engine.eval(&lang, &req).unwrap();
+        assert_eq!(result["__arrow__"], json!(true));
+        assert_eq!(result["params"], json!(["x", "y"]));
+        assert!(result["param_defs"]["__ast__"].is_object());
+    }
+
     // -----------------------------------------------------------------
     // match / handle / destructuring conformance tests
     // -----------------------------------------------------------------
@@ -8219,6 +8506,123 @@ mod tests {
         assert_eq!(engine.eval(&lang, &req).unwrap(), json!("hi"));
     }
 }
+// ---------------------------------------------------------------------------
+// Destructured-param application helpers (`param_defs` arrows)
+// ---------------------------------------------------------------------------
+
+/// [`PatternMatchCtx`] that *collects* bindings instead of defining them
+/// in a scope — used by [`TreeWalkEngine::apply_arrow_patterns`] so the
+/// matched names can be bound in one fresh scope by `apply_arrow_body`.
+///
+/// Literal-pattern evaluation runs in a scratch scope seeded with the
+/// caller's globals; `scope_value`/`global_value` mirror [`TwCtx`] —
+/// arrow `binds` first (they shadow caller bindings, matching how the
+/// body env resolves them), then the caller env (which itself falls
+/// back to globals), then the engine globals.
+struct ParamBindCtx<'a> {
+    engine: &'a TreeWalkEngine,
+    lang: &'a Language,
+    binds: &'a FxHashMap<Rc<str>, TaggedValue>,
+    env: &'a ScopeStack,
+    out: Vec<(Rc<str>, TaggedValue)>,
+}
+
+impl<'a> ParamBindCtx<'a> {
+    fn new(
+        engine: &'a TreeWalkEngine,
+        lang: &'a Language,
+        binds: &'a FxHashMap<Rc<str>, TaggedValue>,
+        env: &'a ScopeStack,
+    ) -> Self {
+        Self {
+            engine,
+            lang,
+            binds,
+            env,
+            out: Vec::new(),
+        }
+    }
+}
+
+impl PatternMatchCtx for ParamBindCtx<'_> {
+    fn define_binding(&mut self, name: &str, value: TaggedValue) {
+        self.out.push((Rc::from(name), value));
+    }
+
+    fn eval_pattern_node(&mut self, ast: &Ast, node_ref: AstRef) -> Result<TaggedValue, LangError> {
+        // Literal patterns evaluate in a scratch scope: globals only —
+        // pattern literals must not see the caller's locals (a `var`
+        // pattern is a binder, not a lookup; only literal nodes eval).
+        let mut scratch = ScopeStack::new();
+        scratch.set_globals(Rc::clone(&self.env.globals));
+        self.engine
+            .eval_node_inner(ast, node_ref, self.lang, &mut scratch)
+    }
+
+    fn global_value(&self, name: &str) -> Option<TaggedValue> {
+        self.engine
+            .globals
+            .get(name)
+            .map(|v| TaggedValue::from(v.clone()))
+    }
+
+    fn scope_value(&self, name: &str) -> Option<TaggedValue> {
+        self.binds
+            .get(name)
+            .cloned()
+            .or_else(|| self.env.lookup(name).cloned())
+    }
+
+    fn lang(&self) -> Option<&Language> {
+        Some(self.lang)
+    }
+}
+
+/// Unwrap a `type-annot`-like wrapper around a top-level param pattern —
+/// the same `subject`-role unwrap [`Language::param_name`] applies, so
+/// `(x: T, [y, z]) ~>` keeps `x` a positional binder while `[y, z]` is a
+/// pattern. Returns the pattern ref to match against.
+fn unwrap_pattern_wrapper(
+    lang: &Language,
+    ast: &Ast,
+    r: AstRef,
+) -> Result<AstRef, LangError> {
+    let node = ast.at(r)?;
+    // Pattern-role nodes (`rest`, `entry`, `sequence`, …) and literals
+    // are already patterns — only wrapper shapes (`type-annot`: `subject`
+    // role, no `pattern_role`) unwrap.
+    if lang.pattern_role(&node.kind).is_none()
+        && let Ok(Some(pos)) = lang.child_role_index_for(node, "subject")
+        && let Some(idx) = node
+            .payload
+            .get("children")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.get(pos))
+            .and_then(|v| v.as_u64())
+    {
+        return Ok(AstRef::new(idx as usize));
+    }
+    Ok(r)
+}
+
+/// The `subject` child of a `rest` param pattern — the node the tail
+/// array binds through.
+fn rest_subject_ref(lang: &Language, rest_node: &AstNode) -> Result<AstRef, LangError> {
+    let pos = lang
+        .child_role_index_for(rest_node, "subject")
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+    rest_node
+        .payload
+        .get("children")
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.get(pos))
+        .and_then(|v| v.as_u64())
+        .map(|i| AstRef::new(i as usize))
+        .ok_or_else(|| LangError::engine("closure: rest param missing subject".to_string()))
+}
+
 // ---------------------------------------------------------------------------
 // ADR-0106 item 2 — `body_def` arena memo (`cached_def_arena`)
 // ---------------------------------------------------------------------------
